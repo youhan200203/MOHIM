@@ -39,6 +39,11 @@ from acestep.training_v2.preprocess_vae import (
 logger = logging.getLogger(__name__)
 
 
+def _sample_tensor_stem(audio_file: Path) -> str:
+    """Return a readable tensor filename stem using the song directory name."""
+    return f"{audio_file.parent.name}_{audio_file.stem}"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -243,7 +248,8 @@ def _pass1_light(
                 progress_callback(i, total, f"[Pass 1] {af.name}")
 
             # Skip if final .pt already exists (resumable)
-            final_pt = out_path / f"{af.stem}.pt"
+            sample_stem = _sample_tensor_stem(af)
+            final_pt = out_path / f"{sample_stem}.pt"
             if final_pt.exists():
                 logger.info("[Side-Step] Skipping (final exists): %s", af.name)
                 continue
@@ -260,7 +266,7 @@ def _pass1_light(
                 # Free raw audio immediately -- no longer needed after VAE encode
                 del audio
 
-                sm = sample_meta.get(af.name, {})
+                sm = sample_meta.get(str(af.resolve()), sample_meta.get(af.name, {}))
 
                 dual_stream_tensors: Dict[str, torch.Tensor] = {}
                 if dual_stream:
@@ -308,7 +314,7 @@ def _pass1_light(
                     )
 
                 # 4. Save intermediate
-                tmp_path = out_path / f"{af.stem}.tmp.pt"
+                tmp_path = out_path / f"{sample_stem}.tmp.pt"
                 intermediate = {
                         "target_latents": target_latents.squeeze(0).cpu(),
                         "attention_mask": attention_mask.squeeze(0).cpu(),

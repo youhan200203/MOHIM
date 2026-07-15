@@ -114,10 +114,18 @@ def load_sample_metadata(
             json_dir = Path(dataset_json).parent
             for s in samples:
                 s = dict(s)
-                for field in ("motif_seed_audio", "motif_target_audio", "vocal_target_audio"):
+                for field in (
+                    "audio_path",
+                    "motif_seed_audio",
+                    "motif_target_audio",
+                    "vocal_target_audio",
+                ):
                     value = s.get(field)
                     if value and not Path(value).is_absolute():
                         s[field] = str(json_dir / value)
+                target_path = s.get("audio_path") or s.get("motif_target_audio")
+                if target_path:
+                    meta[str(Path(target_path).resolve())] = s
                 # Primary key: explicit filename field
                 fname = s.get("filename", "")
                 if fname:
@@ -137,7 +145,7 @@ def load_sample_metadata(
 
     # Fill defaults for any audio file without metadata
     for af in audio_files:
-        if af.name not in meta:
+        if str(af.resolve()) not in meta and af.name not in meta:
             meta[af.name] = {
                 "filename": af.name,
                 "caption": af.stem.replace("_", " ").replace("-", " "),
