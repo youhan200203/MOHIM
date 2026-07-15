@@ -276,6 +276,30 @@ def _add_common_training_args(
     g_train.add_argument("--scheduler-type", type=str, default="cosine", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine)")
     g_train.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="Recompute activations to save VRAM (~40-60%% less, ~10-30%% slower). On by default; use --no-gradient-checkpointing to disable")
     g_train.add_argument("--offload-encoder", action=argparse.BooleanOptionalAction, default=False, help="Move encoder/VAE to CPU after setup (saves ~2-4GB VRAM)")
+    g_train.add_argument(
+        "--dual-stream",
+        action="store_true",
+        default=False,
+        help="Jointly train motif and vocal stem denoising branches",
+    )
+    g_train.add_argument(
+        "--motif-loss-weight",
+        type=float,
+        default=1.0,
+        help="Dual-stream motif flow-loss weight (default: 1.0)",
+    )
+    g_train.add_argument(
+        "--vocal-loss-weight",
+        type=float,
+        default=1.0,
+        help="Dual-stream vocal flow-loss weight (default: 1.0)",
+    )
+    g_train.add_argument(
+        "--dual-stream-max-tokens",
+        type=int,
+        default=64,
+        help="Maximum motif/peer condition tokens per stream (default: 64)",
+    )
 
     # -- Adapter selection ---------------------------------------------------
     g_adapter = parser.add_argument_group("Adapter")
@@ -288,7 +312,7 @@ def _add_common_training_args(
     g_lora.add_argument("--dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
     g_lora.add_argument("--target-modules", nargs="+", default=["q_proj", "k_proj", "v_proj", "o_proj"], help="Modules to apply adapter to")
     g_lora.add_argument("--bias", type=str, default="none", choices=["none", "all", "lora_only"], help="Bias training mode (default: none)")
-    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both)")
+    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both; cross recommended for dual-stream)")
 
     # -- LoKR hyperparams ---------------------------------------------------
     g_lokr = parser.add_argument_group("LoKR (used when --adapter-type=lokr)")

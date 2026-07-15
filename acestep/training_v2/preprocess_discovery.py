@@ -24,6 +24,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"}
 def discover_audio_files(
     audio_dir: Optional[str],
     dataset_json: Optional[str],
+    dual_stream: bool = False,
 ) -> List[Path]:
     """Discover audio files from a dataset JSON or by scanning a directory.
 
@@ -47,7 +48,11 @@ def discover_audio_files(
         audio_files: List[Path] = []
         json_dir = Path(dataset_json).parent  # resolve relative paths vs JSON
         for entry in samples:
-            ap = entry.get("audio_path") or entry.get("filename", "")
+            ap = (
+                entry.get("motif_target_audio")
+                if dual_stream
+                else entry.get("audio_path") or entry.get("filename", "")
+            )
             if not ap:
                 continue
             p = Path(ap)
@@ -106,7 +111,13 @@ def load_sample_metadata(
         try:
             raw = json.loads(Path(dataset_json).read_text(encoding="utf-8"))
             samples = raw if isinstance(raw, list) else raw.get("samples", [])
+            json_dir = Path(dataset_json).parent
             for s in samples:
+                s = dict(s)
+                for field in ("motif_seed_audio", "motif_target_audio", "vocal_target_audio"):
+                    value = s.get(field)
+                    if value and not Path(value).is_absolute():
+                        s[field] = str(json_dir / value)
                 # Primary key: explicit filename field
                 fname = s.get("filename", "")
                 if fname:
@@ -115,9 +126,9 @@ def load_sample_metadata(
                     basename = Path(fname).name
                     if basename != fname and basename not in meta:
                         meta[basename] = s
-                elif s.get("audio_path"):
-                    # Fallback: derive key from audio_path basename
-                    basename = Path(s["audio_path"]).name
+                elif s.get("audio_path") or s.get("motif_target_audio"):
+                    # Fallback: derive key from the conventional or dual-stream target.
+                    basename = Path(s.get("audio_path") or s["motif_target_audio"]).name
                     if basename and basename not in meta:
                         meta[basename] = s
             logger.info("[Side-Step] Loaded metadata for %d samples from %s", len(meta), dataset_json)

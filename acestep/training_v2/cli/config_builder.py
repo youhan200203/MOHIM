@@ -186,6 +186,10 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
         dataset_json=args.dataset_json,
         tensor_output=args.tensor_output,
         max_duration=args.max_duration,
+        dual_stream=getattr(args, "dual_stream", False),
+        motif_loss_weight=getattr(args, "motif_loss_weight", 1.0),
+        vocal_loss_weight=getattr(args, "vocal_loss_weight", 1.0),
+        dual_stream_max_tokens=getattr(args, "dual_stream_max_tokens", 64),
     )
 
     return adapter_cfg, train_cfg

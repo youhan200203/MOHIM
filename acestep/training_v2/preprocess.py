@@ -53,6 +53,7 @@ def preprocess_audio_files(
     dataset_json: Optional[str] = None,
     device: str = "auto",
     precision: str = "auto",
+    dual_stream: bool = False,
     progress_callback: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
 ) -> Dict[str, Any]:
@@ -80,6 +81,8 @@ def preprocess_audio_files(
             audio paths.
         device: Target device (``"auto"`` to auto-detect).
         precision: Target precision (``"auto"`` to auto-detect).
+        dual_stream: Also encode motif seed, motif target, and vocal target
+            stems declared in the dataset JSON.
         progress_callback: ``(current, total, message) -> None``.
         cancel_check: ``() -> bool`` -- return True to cancel.
 
@@ -96,7 +99,7 @@ def preprocess_audio_files(
     out_path.mkdir(parents=True, exist_ok=True)
 
     # -- Discover audio files -----------------------------------------------
-    audio_files = _discover_audio_files(audio_dir, dataset_json)
+    audio_files = _discover_audio_files(audio_dir, dataset_json, dual_stream=dual_stream)
     if not audio_files:
         logger.warning("[Side-Step] No audio files found")
         return {"processed": 0, "failed": 0, "total": 0, "output_dir": str(out_path)}
@@ -128,6 +131,7 @@ def preprocess_audio_files(
         max_duration=max_duration,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
+        dual_stream=dual_stream,
     )
 
     # -- Pass 2: DIT Encoder ------------------------------------------------
@@ -175,6 +179,7 @@ def _pass1_light(
     max_duration: float,
     progress_callback: Optional[Callable],
     cancel_check: Optional[Callable],
+    dual_stream: bool,
 ) -> tuple[List[Path], int]:
     """Load audio, VAE-encode, text-encode, save intermediates.
 
@@ -196,6 +201,10 @@ def _pass1_light(
     )
     from acestep.training.dataset_builder_modules.preprocess_text import encode_text
     from acestep.training.dataset_builder_modules.preprocess_lyrics import encode_lyrics
+    from acestep.training_v2.dual_stream_preprocess import (
+        DUAL_STREAM_AUDIO_FIELDS,
+        encode_stem_latents,
+    )
 
     dtype = _resolve_dtype(precision)
 
@@ -251,13 +260,36 @@ def _pass1_light(
                 # Free raw audio immediately -- no longer needed after VAE encode
                 del audio
 
+                sm = sample_meta.get(af.name, {})
+
+                dual_stream_tensors: Dict[str, torch.Tensor] = {}
+                if dual_stream:
+                    missing = [field for field in DUAL_STREAM_AUDIO_FIELDS if not sm.get(field)]
+                    if missing:
+                        raise ValueError(f"Dual-stream sample is missing stem paths: {missing}")
+                    dual_stream_tensors["motif_target_latents"] = target_latents.squeeze(0).cpu()
+                    dual_stream_tensors["motif_target_attention_mask"] = torch.ones(
+                        target_latents.shape[1], dtype=dtype
+                    )
+                    for field in ("motif_seed_audio", "vocal_target_audio"):
+                        stem = encode_stem_latents(sm[field], vae, dtype, max_duration)
+                        dual_stream_tensors[field.replace("_audio", "_latents")] = stem
+                        dual_stream_tensors[field.replace("_audio", "_attention_mask")] = torch.ones(
+                            stem.shape[0], dtype=dtype
+                        )
+                    vocal_length = dual_stream_tensors["vocal_target_latents"].shape[0]
+                    if vocal_length != target_latents.shape[1]:
+                        raise ValueError(
+                            "motif_target_audio and vocal_target_audio must be time-aligned "
+                            f"({target_latents.shape[1]} vs {vocal_length} latent frames)"
+                        )
+
                 latent_length = target_latents.shape[1]
                 attention_mask = torch.ones(
                     1, latent_length, device=device, dtype=dtype
                 )
 
                 # 3. Text encode
-                sm = sample_meta.get(af.name, {})
                 caption = sm.get("caption", af.stem)
                 lyrics = sm.get("lyrics", "[Instrumental]")
 
@@ -277,8 +309,7 @@ def _pass1_light(
 
                 # 4. Save intermediate
                 tmp_path = out_path / f"{af.stem}.tmp.pt"
-                torch.save(
-                    {
+                intermediate = {
                         "target_latents": target_latents.squeeze(0).cpu(),
                         "attention_mask": attention_mask.squeeze(0).cpu(),
                         "text_hidden_states": text_hs.cpu(),
@@ -301,9 +332,9 @@ def _pass1_light(
                             "custom_tag": sm.get("custom_tag", ""),
                             "prompt_override": sm.get("prompt_override"),
                         },
-                    },
-                    tmp_path,
-                )
+                    }
+                intermediate.update(dual_stream_tensors)
+                torch.save(intermediate, tmp_path)
 
                 # Free GPU tensors from this iteration before the next one
                 del target_latents, attention_mask, text_hs, text_mask
@@ -432,17 +463,25 @@ def _pass2_heavy(
                 base_name = tmp_path.name.replace(".tmp.pt", ".pt")
                 final_path = out_path / base_name
                 meta = data["metadata"]
-                torch.save(
-                    {
+                final_data = {
                         "target_latents": data["target_latents"],
                         "attention_mask": data["attention_mask"],
                         "encoder_hidden_states": encoder_hs.squeeze(0).cpu(),
                         "encoder_attention_mask": encoder_mask.squeeze(0).cpu(),
                         "context_latents": context_latents.squeeze(0).cpu(),
                         "metadata": meta,
-                    },
-                    final_path,
-                )
+                    }
+                for key in (
+                    "motif_seed_latents",
+                    "motif_seed_attention_mask",
+                    "motif_target_latents",
+                    "motif_target_attention_mask",
+                    "vocal_target_latents",
+                    "vocal_target_attention_mask",
+                ):
+                    if key in data:
+                        final_data[key] = data[key]
+                torch.save(final_data, final_path)
 
                 # Free all GPU tensors and the loaded data dict before next iter
                 del encoder_hs, encoder_mask, context_latents, data

@@ -29,6 +29,10 @@ from acestep.training.lokr_utils import (
 
 # V2 modules
 from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, TrainingConfigV2
+from acestep.training_v2.dual_stream import (
+    DualStreamConditioner,
+)
+from acestep.training_v2.dual_stream_training import run_dual_stream_training_step
 from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
 from acestep.training_v2.ui import TrainingUpdate
 
@@ -179,6 +183,12 @@ class FixedLoRAModule(nn.Module):
         else:
             self._inject_lora(model, adapter_config)  # type: ignore[arg-type]
 
+        self.dual_stream_enabled = training_config.dual_stream
+        if self.dual_stream_enabled:
+            if self.adapter_type != "lora":
+                raise ValueError("Dual-stream training currently requires PEFT LoRA adapters.")
+            self._attach_dual_stream_conditioner()
+
         # Backward-compat alias
         self.lora_info = self.adapter_info
 
@@ -265,6 +275,26 @@ class FixedLoRAModule(nn.Module):
             self.device,
         )
 
+    def _attach_dual_stream_conditioner(self) -> None:
+        """Attach trainable motif/peer condition projections to the PEFT decoder."""
+        model_config = self.model.config
+        latent_dim = int(getattr(model_config, "audio_acoustic_hidden_dim", 64))
+        condition_dim = int(
+            getattr(model_config, "encoder_hidden_size", None) or model_config.hidden_size
+        )
+        conditioner = DualStreamConditioner(
+            latent_dim=latent_dim,
+            condition_dim=condition_dim,
+            max_tokens=self.training_config.dual_stream_max_tokens,
+        ).to(device=self.device, dtype=self.dtype)
+        self.model.decoder.add_module("dual_stream_conditioner", conditioner)
+        for parameter in conditioner.parameters():
+            parameter.requires_grad = True
+        logger.info(
+            "[OK] Dual-stream conditioner attached (%d trainable params)",
+            sum(parameter.numel() for parameter in conditioner.parameters()),
+        )
+
     # -----------------------------------------------------------------------
     # Training step
     # -----------------------------------------------------------------------
@@ -280,6 +310,9 @@ class FixedLoRAModule(nn.Module):
         Returns:
             Scalar loss tensor (``float32`` for stable backward).
         """
+        if self.dual_stream_enabled:
+            return run_dual_stream_training_step(self, batch)
+
         # Mixed-precision context
         if self.device_type in ("cuda", "xpu", "mps") and self.dtype != torch.float32:
             autocast_ctx = torch.autocast(

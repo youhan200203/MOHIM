@@ -45,7 +45,7 @@ class PreprocessedTensorDataset(Dataset):
     No VAE/text encoder needed during training - just load tensors directly!
     """
     
-    def __init__(self, tensor_dir: str):
+    def __init__(self, tensor_dir: str, dual_stream: bool = False):
         """Initialize from a directory of preprocessed .pt files.
         
         Args:
@@ -58,6 +58,7 @@ class PreprocessedTensorDataset(Dataset):
         if not os.path.isdir(validated_dir):
             raise ValueError(f"Not an existing directory: {tensor_dir}")
         self.tensor_dir = validated_dir
+        self.dual_stream = dual_stream
         self.sample_paths: List[str] = []
         
         # Load manifest if exists
@@ -139,7 +140,7 @@ class PreprocessedTensorDataset(Dataset):
         tensor_path = self.valid_paths[idx]
         data = torch.load(tensor_path, map_location='cpu', weights_only=True)
         
-        return {
+        sample = {
             "target_latents": data["target_latents"],  # [T, 64]
             "attention_mask": data["attention_mask"],  # [T]
             "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
@@ -147,6 +148,17 @@ class PreprocessedTensorDataset(Dataset):
             "context_latents": data["context_latents"],  # [T, 65]
             "metadata": data.get("metadata", {}),
         }
+        if self.dual_stream:
+            required = (
+                "motif_seed_latents", "motif_seed_attention_mask",
+                "motif_target_latents", "motif_target_attention_mask",
+                "vocal_target_latents", "vocal_target_attention_mask",
+            )
+            missing = [key for key in required if key not in data]
+            if missing:
+                raise ValueError(f"Dual-stream tensor {tensor_path} is missing keys: {missing}")
+            sample.update({key: data[key] for key in required})
+        return sample
 
 
 def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -207,13 +219,44 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             eam = torch.cat([eam, pad], dim=0)
         encoder_attention_masks.append(eam)
     
-    return {
+    result = {
         "target_latents": torch.stack(target_latents),  # [B, T, 64]
         "attention_mask": torch.stack(attention_masks),  # [B, T]
         "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
         "encoder_attention_mask": torch.stack(encoder_attention_masks),  # [B, L]
         "context_latents": torch.stack(context_latents),  # [B, T, 65]
         "metadata": [s["metadata"] for s in batch],
+    }
+    if "motif_seed_latents" in batch[0]:
+        result.update(_collate_dual_stream_batch(batch))
+    return result
+
+
+def _pad_sequence(tensor: torch.Tensor, max_length: int) -> torch.Tensor:
+    """Pad a time-major tensor with zeros to ``max_length``."""
+    if tensor.shape[0] >= max_length:
+        return tensor
+    return torch.cat([tensor, tensor.new_zeros(max_length - tensor.shape[0], *tensor.shape[1:])], dim=0)
+
+
+def _collate_dual_stream_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    """Pad dual-stream motif and vocal tensors to their batch maxima."""
+    max_seed = max(sample["motif_seed_latents"].shape[0] for sample in batch)
+    max_target = max(
+        max(sample["motif_target_latents"].shape[0], sample["vocal_target_latents"].shape[0])
+        for sample in batch
+    )
+    fields = {
+        "motif_seed_latents": max_seed,
+        "motif_seed_attention_mask": max_seed,
+        "motif_target_latents": max_target,
+        "motif_target_attention_mask": max_target,
+        "vocal_target_latents": max_target,
+        "vocal_target_attention_mask": max_target,
+    }
+    return {
+        field: torch.stack([_pad_sequence(sample[field], length) for sample in batch])
+        for field, length in fields.items()
     }
 
 
@@ -234,6 +277,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         persistent_workers: bool = True,
         pin_memory_device: str = "",
         val_split: float = 0.0,
+        dual_stream: bool = False,
     ):
         """Initialize the data module.
         
@@ -255,6 +299,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         self.persistent_workers = persistent_workers
         self.pin_memory_device = pin_memory_device
         self.val_split = val_split
+        self.dual_stream = dual_stream
         
         self.train_dataset = None
         self.val_dataset = None
@@ -263,7 +308,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         """Setup datasets."""
         if stage == 'fit' or stage is None:
             # Create full dataset
-            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
+            full_dataset = PreprocessedTensorDataset(self.tensor_dir, dual_stream=self.dual_stream)
             
             # Split if validation requested
             if self.val_split > 0 and len(full_dataset) > 1:

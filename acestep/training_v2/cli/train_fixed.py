@@ -177,6 +177,7 @@ def _run_preprocess(args: argparse.Namespace) -> int:
             dataset_json=dataset_json,
             device=args.device,
             precision=args.precision,
+            dual_stream=getattr(args, "dual_stream", False),
         )
     except Exception as exc:
         print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)

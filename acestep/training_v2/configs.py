@@ -231,6 +231,19 @@ class TrainingConfigV2(TrainingConfig):
     max_duration: float = 240.0
     """Maximum audio duration in seconds (preprocessing)."""
 
+    # --- Dual-stream motif/vocal training ---------------------------------
+    dual_stream: bool = False
+    """Train motif and vocal stems jointly instead of a single audio target."""
+
+    motif_loss_weight: float = 1.0
+    """Weight applied to the motif-stream flow matching loss."""
+
+    vocal_loss_weight: float = 1.0
+    """Weight applied to the vocal-stream flow matching loss."""
+
+    dual_stream_max_tokens: int = 64
+    """Maximum motif-seed or peer-stream tokens appended to DiT conditions."""
+
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------

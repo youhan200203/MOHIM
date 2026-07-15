@@ -9,6 +9,7 @@ configuration, and module wrapper introspection -- extracted from
 from __future__ import annotations
 
 import logging
+import json
 import os
 from pathlib import Path
 from typing import Any, Generator, Optional, Tuple
@@ -182,6 +183,30 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
         else:
             # Fallback for non-PEFT models
             save_lora_weights(module.model, output_dir)
+
+    conditioner = getattr(raw_decoder, "dual_stream_conditioner", None) if trainer.adapter_type != "lokr" else None
+    if conditioner is not None:
+        _save_dual_stream_conditioner(conditioner, output_dir)
+
+
+def _save_dual_stream_conditioner(conditioner: nn.Module, output_dir: str) -> None:
+    """Persist non-PEFT dual-stream conditioner weights beside the LoRA adapter."""
+    config_path = Path(output_dir) / "dual_stream_config.json"
+    weights_path = Path(output_dir) / "dual_stream_conditioner.pt"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "latent_dim": conditioner.latent_dim,
+                "condition_dim": conditioner.condition_dim,
+                "max_tokens": conditioner.max_tokens,
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    torch.save(conditioner.state_dict(), weights_path)
+    logger.info("[OK] Dual-stream conditioner saved to %s", weights_path)
 
 
 def save_checkpoint(
@@ -396,6 +421,7 @@ def resume_checkpoint(
             if hasattr(decoder, "_forward_module"):
                 decoder = decoder._forward_module
             decoder.load_state_dict(state_dict, strict=False)
+            _load_dual_stream_conditioner(module, ckpt_dir)
 
             start_epoch = ckpt_info["epoch"]
             g_step = ckpt_info["global_step"]
@@ -414,3 +440,20 @@ def resume_checkpoint(
         0, 0.0, f"[WARN] No valid checkpoint in {ckpt_dir}", kind="warn"
     )
     return None
+
+
+def _load_dual_stream_conditioner(module: Any, checkpoint_dir: Path) -> None:
+    """Restore optional dual-stream conditioner weights during resume."""
+    weights_path = checkpoint_dir / "dual_stream_conditioner.pt"
+    if not weights_path.exists():
+        return
+    decoder = module.model.decoder
+    while hasattr(decoder, "_forward_module"):
+        decoder = decoder._forward_module
+    conditioner = getattr(decoder, "dual_stream_conditioner", None)
+    if conditioner is None:
+        logger.warning("Dual-stream weights found but the current model has no conditioner.")
+        return
+    state = torch.load(weights_path, map_location=module.device, weights_only=True)
+    conditioner.load_state_dict(state)
+    logger.info("[OK] Dual-stream conditioner restored from %s", weights_path)

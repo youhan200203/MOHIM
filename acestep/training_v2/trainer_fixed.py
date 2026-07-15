@@ -152,6 +152,7 @@ class FixedLoRATrainer:
                 prefetch_factor=cfg.prefetch_factor if num_workers > 0 else None,
                 persistent_workers=cfg.persistent_workers if num_workers > 0 else False,
                 pin_memory_device=cfg.pin_memory_device,
+                dual_stream=cfg.dual_stream,
             )
             data_module.setup("fit")
 
