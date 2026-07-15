@@ -44,6 +44,37 @@ def _sample_tensor_stem(audio_file: Path) -> str:
     return f"{audio_file.parent.name}_{audio_file.stem}"
 
 
+def _has_nonfinite(value: Any) -> bool:
+    """Recursively detect NaN/Inf in a module forward-hook output."""
+    if isinstance(value, torch.Tensor):
+        return value.is_floating_point() and not bool(torch.isfinite(value).all())
+    if isinstance(value, dict):
+        return any(_has_nonfinite(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return any(_has_nonfinite(item) for item in value)
+    return False
+
+
+def _find_first_nonfinite_encoder_module(model: Any, forward: Callable[[], Any]) -> str:
+    """Re-run one bad encoder forward and return its first non-finite stage."""
+    first_bad: List[str] = []
+    handles = []
+    for name, module in model.encoder.named_modules():
+        label = f"encoder.{name}" if name else "encoder"
+
+        def check_output(_module: Any, _inputs: Any, output: Any, label: str = label) -> None:
+            if not first_bad and _has_nonfinite(output):
+                first_bad.append(label)
+
+        handles.append(module.register_forward_hook(check_output))
+    try:
+        forward()
+    finally:
+        for handle in handles:
+            handle.remove()
+    return first_bad[0] if first_bad else "encoder output packing"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -438,6 +469,16 @@ def _pass2_heavy(
                 )
                 latent_length = data["latent_length"]
 
+                for name, tensor in (
+                    ("text_hidden_states", text_hs),
+                    ("lyric_hidden_states", lyric_hs),
+                ):
+                    if _has_nonfinite(tensor):
+                        raise FloatingPointError(
+                            f"encoder input {name} already contains NaN/Inf "
+                            f"before the condition encoder (dtype={model_dtype})"
+                        )
+
                 # DIT encoder pass (adapter-agnostic: same tensors for
                 # LoRA and LoKR -- only the adapter injection differs).
                 encoder_hs, encoder_mask = run_encoder(
@@ -449,6 +490,24 @@ def _pass2_heavy(
                     device=str(model_device),
                     dtype=model_dtype,
                 )
+                if _has_nonfinite(encoder_hs):
+                    stage = _find_first_nonfinite_encoder_module(
+                        model,
+                        lambda: run_encoder(
+                            model,
+                            text_hidden_states=text_hs,
+                            text_attention_mask=text_mask,
+                            lyric_hidden_states=lyric_hs,
+                            lyric_attention_mask=lyric_mask,
+                            device=str(model_device),
+                            dtype=model_dtype,
+                        ),
+                    )
+                    raise FloatingPointError(
+                        "encoder_hidden_states contains NaN/Inf in "
+                        f"{stage} (dtype={model_dtype}, attention="
+                        f"{getattr(model.config, '_attn_implementation', 'unknown')})"
+                    )
 
                 # Free encoder inputs immediately after use
                 del text_hs, text_mask, lyric_hs, lyric_mask
