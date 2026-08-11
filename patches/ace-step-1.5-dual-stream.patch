@@ -1,0 +1,1089 @@
+diff --git a/acestep/training/data_module.py b/acestep/training/data_module.py
+index 68e0b23..0b033e6 100644
+--- a/acestep/training/data_module.py
++++ b/acestep/training/data_module.py
+@@ -45,7 +45,7 @@ class PreprocessedTensorDataset(Dataset):
+     No VAE/text encoder needed during training - just load tensors directly!
+     """
+     
+-    def __init__(self, tensor_dir: str):
++    def __init__(self, tensor_dir: str, dual_stream: bool = False):
+         """Initialize from a directory of preprocessed .pt files.
+         
+         Args:
+@@ -58,6 +58,7 @@ class PreprocessedTensorDataset(Dataset):
+         if not os.path.isdir(validated_dir):
+             raise ValueError(f"Not an existing directory: {tensor_dir}")
+         self.tensor_dir = validated_dir
++        self.dual_stream = dual_stream
+         self.sample_paths: List[str] = []
+         
+         # Load manifest if exists
+@@ -139,7 +140,7 @@ class PreprocessedTensorDataset(Dataset):
+         tensor_path = self.valid_paths[idx]
+         data = torch.load(tensor_path, map_location='cpu', weights_only=True)
+         
+-        return {
++        sample = {
+             "target_latents": data["target_latents"],  # [T, 64]
+             "attention_mask": data["attention_mask"],  # [T]
+             "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
+@@ -147,6 +148,17 @@ class PreprocessedTensorDataset(Dataset):
+             "context_latents": data["context_latents"],  # [T, 65]
+             "metadata": data.get("metadata", {}),
+         }
++        if self.dual_stream:
++            required = (
++                "motif_seed_latents", "motif_seed_attention_mask",
++                "motif_target_latents", "motif_target_attention_mask",
++                "vocal_target_latents", "vocal_target_attention_mask",
++            )
++            missing = [key for key in required if key not in data]
++            if missing:
++                raise ValueError(f"Dual-stream tensor {tensor_path} is missing keys: {missing}")
++            sample.update({key: data[key] for key in required})
++        return sample
+ 
+ 
+ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+@@ -207,7 +219,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+             eam = torch.cat([eam, pad], dim=0)
+         encoder_attention_masks.append(eam)
+     
+-    return {
++    result = {
+         "target_latents": torch.stack(target_latents),  # [B, T, 64]
+         "attention_mask": torch.stack(attention_masks),  # [B, T]
+         "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
+@@ -215,6 +227,37 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+         "context_latents": torch.stack(context_latents),  # [B, T, 65]
+         "metadata": [s["metadata"] for s in batch],
+     }
++    if "motif_seed_latents" in batch[0]:
++        result.update(_collate_dual_stream_batch(batch))
++    return result
++
++
++def _pad_sequence(tensor: torch.Tensor, max_length: int) -> torch.Tensor:
++    """Pad a time-major tensor with zeros to ``max_length``."""
++    if tensor.shape[0] >= max_length:
++        return tensor
++    return torch.cat([tensor, tensor.new_zeros(max_length - tensor.shape[0], *tensor.shape[1:])], dim=0)
++
++
++def _collate_dual_stream_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
++    """Pad dual-stream motif and vocal tensors to their batch maxima."""
++    max_seed = max(sample["motif_seed_latents"].shape[0] for sample in batch)
++    max_target = max(
++        max(sample["motif_target_latents"].shape[0], sample["vocal_target_latents"].shape[0])
++        for sample in batch
++    )
++    fields = {
++        "motif_seed_latents": max_seed,
++        "motif_seed_attention_mask": max_seed,
++        "motif_target_latents": max_target,
++        "motif_target_attention_mask": max_target,
++        "vocal_target_latents": max_target,
++        "vocal_target_attention_mask": max_target,
++    }
++    return {
++        field: torch.stack([_pad_sequence(sample[field], length) for sample in batch])
++        for field, length in fields.items()
++    }
+ 
+ 
+ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
+@@ -234,6 +277,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+         persistent_workers: bool = True,
+         pin_memory_device: str = "",
+         val_split: float = 0.0,
++        dual_stream: bool = False,
+     ):
+         """Initialize the data module.
+         
+@@ -255,6 +299,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+         self.persistent_workers = persistent_workers
+         self.pin_memory_device = pin_memory_device
+         self.val_split = val_split
++        self.dual_stream = dual_stream
+         
+         self.train_dataset = None
+         self.val_dataset = None
+@@ -263,7 +308,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+         """Setup datasets."""
+         if stage == 'fit' or stage is None:
+             # Create full dataset
+-            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
++            full_dataset = PreprocessedTensorDataset(self.tensor_dir, dual_stream=self.dual_stream)
+             
+             # Split if validation requested
+             if self.val_split > 0 and len(full_dataset) > 1:
+diff --git a/acestep/training_v2/cli/args.py b/acestep/training_v2/cli/args.py
+index 988ff2a..441b920 100644
+--- a/acestep/training_v2/cli/args.py
++++ b/acestep/training_v2/cli/args.py
+@@ -276,6 +276,30 @@ def _add_common_training_args(
+     g_train.add_argument("--scheduler-type", type=str, default="cosine", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine)")
+     g_train.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="Recompute activations to save VRAM (~40-60%% less, ~10-30%% slower). On by default; use --no-gradient-checkpointing to disable")
+     g_train.add_argument("--offload-encoder", action=argparse.BooleanOptionalAction, default=False, help="Move encoder/VAE to CPU after setup (saves ~2-4GB VRAM)")
++    g_train.add_argument(
++        "--dual-stream",
++        action="store_true",
++        default=False,
++        help="Jointly train motif and vocal stem denoising branches",
++    )
++    g_train.add_argument(
++        "--motif-loss-weight",
++        type=float,
++        default=1.0,
++        help="Dual-stream motif flow-loss weight (default: 1.0)",
++    )
++    g_train.add_argument(
++        "--vocal-loss-weight",
++        type=float,
++        default=1.0,
++        help="Dual-stream vocal flow-loss weight (default: 1.0)",
++    )
++    g_train.add_argument(
++        "--dual-stream-max-tokens",
++        type=int,
++        default=64,
++        help="Maximum motif/peer condition tokens per stream (default: 64)",
++    )
+ 
+     # -- Adapter selection ---------------------------------------------------
+     g_adapter = parser.add_argument_group("Adapter")
+@@ -288,7 +312,7 @@ def _add_common_training_args(
+     g_lora.add_argument("--dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
+     g_lora.add_argument("--target-modules", nargs="+", default=["q_proj", "k_proj", "v_proj", "o_proj"], help="Modules to apply adapter to")
+     g_lora.add_argument("--bias", type=str, default="none", choices=["none", "all", "lora_only"], help="Bias training mode (default: none)")
+-    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both)")
++    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both; cross recommended for dual-stream)")
+ 
+     # -- LoKR hyperparams ---------------------------------------------------
+     g_lokr = parser.add_argument_group("LoKR (used when --adapter-type=lokr)")
+diff --git a/acestep/training_v2/cli/config_builder.py b/acestep/training_v2/cli/config_builder.py
+index 5c3436a..6e82878 100644
+--- a/acestep/training_v2/cli/config_builder.py
++++ b/acestep/training_v2/cli/config_builder.py
+@@ -186,6 +186,10 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
+         dataset_json=args.dataset_json,
+         tensor_output=args.tensor_output,
+         max_duration=args.max_duration,
++        dual_stream=getattr(args, "dual_stream", False),
++        motif_loss_weight=getattr(args, "motif_loss_weight", 1.0),
++        vocal_loss_weight=getattr(args, "vocal_loss_weight", 1.0),
++        dual_stream_max_tokens=getattr(args, "dual_stream_max_tokens", 64),
+     )
+ 
+     return adapter_cfg, train_cfg
+diff --git a/acestep/training_v2/cli/train_fixed.py b/acestep/training_v2/cli/train_fixed.py
+index 252135e..7072dda 100644
+--- a/acestep/training_v2/cli/train_fixed.py
++++ b/acestep/training_v2/cli/train_fixed.py
+@@ -177,6 +177,7 @@ def _run_preprocess(args: argparse.Namespace) -> int:
+             dataset_json=dataset_json,
+             device=args.device,
+             precision=args.precision,
++            dual_stream=getattr(args, "dual_stream", False),
+         )
+     except Exception as exc:
+         print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)
+diff --git a/acestep/training_v2/configs.py b/acestep/training_v2/configs.py
+index 1f9680a..05bc079 100644
+--- a/acestep/training_v2/configs.py
++++ b/acestep/training_v2/configs.py
+@@ -231,6 +231,19 @@ class TrainingConfigV2(TrainingConfig):
+     max_duration: float = 240.0
+     """Maximum audio duration in seconds (preprocessing)."""
+ 
++    # --- Dual-stream motif/vocal training ---------------------------------
++    dual_stream: bool = False
++    """Train motif and vocal stems jointly instead of a single audio target."""
++
++    motif_loss_weight: float = 1.0
++    """Weight applied to the motif-stream flow matching loss."""
++
++    vocal_loss_weight: float = 1.0
++    """Weight applied to the vocal-stream flow matching loss."""
++
++    dual_stream_max_tokens: int = 64
++    """Maximum motif-seed or peer-stream tokens appended to DiT conditions."""
++
+     # -----------------------------------------------------------------------
+     # Helpers
+     # -----------------------------------------------------------------------
+diff --git a/acestep/training_v2/dual_stream.py b/acestep/training_v2/dual_stream.py
+new file mode 100644
+index 0000000..c80ba2e
+--- /dev/null
++++ b/acestep/training_v2/dual_stream.py
+@@ -0,0 +1,88 @@
++"""Dual-stream conditioning helpers for motif and vocal stem training.
++
++The helpers keep ACE-Step's DiT unchanged. They turn the motif seed and the
++other stream's current noisy latent into cross-attention tokens, so both
++flow-matching branches can be denoised jointly with shared DiT weights.
++"""
++
++from __future__ import annotations
++
++from typing import Tuple
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++
++MOTIF_ROLE = 0
++VOCAL_ROLE = 1
++
++
++def masked_adaptive_pool(
++    latents: torch.Tensor,
++    attention_mask: torch.Tensor,
++    max_tokens: int,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Pool variable-length latent sequences without averaging padded frames."""
++    if latents.ndim != 3 or attention_mask.ndim != 2:
++        raise ValueError("latents must be [B, T, C] and attention_mask must be [B, T]")
++    if latents.shape[:2] != attention_mask.shape:
++        raise ValueError("latent and attention-mask time dimensions must match")
++    if max_tokens < 1:
++        raise ValueError("max_tokens must be positive")
++
++    token_count = min(max_tokens, latents.shape[1])
++    mask = attention_mask.to(dtype=latents.dtype).unsqueeze(-1)
++    values = F.adaptive_avg_pool1d((latents * mask).transpose(1, 2), token_count)
++    weights = F.adaptive_avg_pool1d(mask.transpose(1, 2), token_count)
++    pooled = (values / weights.clamp_min(torch.finfo(latents.dtype).eps)).transpose(1, 2)
++    return pooled, weights.squeeze(1).gt(0)
++
++
++class DualStreamConditioner(nn.Module):
++    """Build role-aware motif and peer-stream condition tokens for a DiT."""
++
++    def __init__(self, latent_dim: int, condition_dim: int, max_tokens: int = 64) -> None:
++        """Initialize projections for motif seed and peer-stream latents."""
++        super().__init__()
++        self.latent_dim = latent_dim
++        self.condition_dim = condition_dim
++        self.max_tokens = max_tokens
++        self.seed_projection = nn.Sequential(nn.LayerNorm(latent_dim), nn.Linear(latent_dim, condition_dim))
++        self.peer_projection = nn.Sequential(nn.LayerNorm(latent_dim), nn.Linear(latent_dim, condition_dim))
++        self.role_embedding = nn.Embedding(2, condition_dim)
++        self.seed_type_embedding = nn.Parameter(torch.zeros(1, 1, condition_dim))
++        self.peer_type_embedding = nn.Parameter(torch.zeros(1, 1, condition_dim))
++
++    def build_condition(
++        self,
++        encoder_hidden_states: torch.Tensor,
++        encoder_attention_mask: torch.Tensor,
++        motif_seed_latents: torch.Tensor,
++        motif_seed_attention_mask: torch.Tensor,
++        peer_latents: torch.Tensor,
++        peer_attention_mask: torch.Tensor,
++        role: int,
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        """Prefix base text conditions with motif-seed and peer-stream tokens."""
++        if role not in (MOTIF_ROLE, VOCAL_ROLE):
++            raise ValueError(f"unknown dual-stream role: {role}")
++        seed_tokens, seed_mask = masked_adaptive_pool(
++            motif_seed_latents, motif_seed_attention_mask, self.max_tokens
++        )
++        peer_tokens, peer_mask = masked_adaptive_pool(
++            peer_latents, peer_attention_mask, self.max_tokens
++        )
++        seed_tokens = self.seed_projection(seed_tokens) + self.seed_type_embedding
++        peer_tokens = self.peer_projection(peer_tokens) + self.peer_type_embedding
++        batch_size = encoder_hidden_states.shape[0]
++        role_ids = torch.full(
++            (batch_size,), role, device=encoder_hidden_states.device, dtype=torch.long
++        )
++        role_token = self.role_embedding(role_ids).unsqueeze(1)
++        role_mask = torch.ones(batch_size, 1, device=encoder_attention_mask.device, dtype=torch.bool)
++        condition = torch.cat([role_token, seed_tokens, peer_tokens, encoder_hidden_states], dim=1)
++        mask = torch.cat(
++            [role_mask, seed_mask, peer_mask, encoder_attention_mask.to(torch.bool)], dim=1
++        )
++        return condition, mask.to(dtype=encoder_attention_mask.dtype)
+diff --git a/acestep/training_v2/dual_stream_inference.py b/acestep/training_v2/dual_stream_inference.py
+new file mode 100644
+index 0000000..6b84e0e
+--- /dev/null
++++ b/acestep/training_v2/dual_stream_inference.py
+@@ -0,0 +1,96 @@
++"""Joint Euler sampler for validating dual-stream motif/vocal adapters.
++
++The caller supplies already encoded text conditions and a VAE-encoded motif
++seed. Keeping audio/text encoding outside this module makes it usable from a
++small research script without adding a Gradio or HTTP surface.
++"""
++
++from __future__ import annotations
++
++from typing import Tuple
++
++import torch
++
++from acestep.training_v2.dual_stream import (
++    MOTIF_ROLE,
++    VOCAL_ROLE,
++    DualStreamConditioner,
++)
++
++
++@torch.no_grad()
++def sample_dual_stream_latents(
++    decoder: torch.nn.Module,
++    conditioner: DualStreamConditioner,
++    encoder_hidden_states: torch.Tensor,
++    encoder_attention_mask: torch.Tensor,
++    motif_seed_latents: torch.Tensor,
++    motif_seed_attention_mask: torch.Tensor,
++    output_frames: int,
++    latent_dim: int,
++    steps: int = 50,
++    seed: int | None = None,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Jointly denoise motif and vocal latent streams with Euler integration.
++
++    Returns motif and vocal latents shaped ``[batch, output_frames, latent_dim]``.
++    The caller can decode each stream with ACE-Step's VAE and optionally mix
++    them only for listening; no full-mix model target is involved.
++    """
++    if output_frames < 1 or latent_dim < 1 or steps < 1:
++        raise ValueError("output_frames, latent_dim, and steps must be positive")
++    device = encoder_hidden_states.device
++    dtype = encoder_hidden_states.dtype
++    generator = None
++    if seed is not None:
++        generator = torch.Generator(device=device).manual_seed(seed)
++    shape = (encoder_hidden_states.shape[0], output_frames, latent_dim)
++    motif = torch.randn(shape, device=device, dtype=dtype, generator=generator)
++    vocal = torch.randn(shape, device=device, dtype=dtype, generator=generator)
++    stream_mask = torch.ones(shape[:2], device=device, dtype=dtype)
++    context = torch.zeros(shape[0], shape[1], latent_dim * 2, device=device, dtype=dtype)
++    times = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=dtype)
++
++    for index in range(steps):
++        t = times[index].expand(shape[0])
++        dt = times[index + 1] - times[index]
++        motif_condition, motif_condition_mask = conditioner.build_condition(
++            encoder_hidden_states,
++            encoder_attention_mask,
++            motif_seed_latents,
++            motif_seed_attention_mask,
++            vocal,
++            stream_mask,
++            MOTIF_ROLE,
++        )
++        vocal_condition, vocal_condition_mask = conditioner.build_condition(
++            encoder_hidden_states,
++            encoder_attention_mask,
++            motif_seed_latents,
++            motif_seed_attention_mask,
++            motif,
++            stream_mask,
++            VOCAL_ROLE,
++        )
++        motif_velocity = decoder(
++            hidden_states=motif,
++            timestep=t,
++            timestep_r=t,
++            attention_mask=stream_mask,
++            encoder_hidden_states=motif_condition,
++            encoder_attention_mask=motif_condition_mask,
++            context_latents=context,
++        )[0]
++        vocal_velocity = decoder(
++            hidden_states=vocal,
++            timestep=t,
++            timestep_r=t,
++            attention_mask=stream_mask,
++            encoder_hidden_states=vocal_condition,
++            encoder_attention_mask=vocal_condition_mask,
++            context_latents=context,
++        )[0]
++        motif = motif + dt * motif_velocity
++        vocal = vocal + dt * vocal_velocity
++
++    return motif, vocal
+diff --git a/acestep/training_v2/dual_stream_preprocess.py b/acestep/training_v2/dual_stream_preprocess.py
+new file mode 100644
+index 0000000..d03a550
+--- /dev/null
++++ b/acestep/training_v2/dual_stream_preprocess.py
+@@ -0,0 +1,34 @@
++"""Audio-stem encoding helpers used by dual-stream preprocessing."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import torch
++
++from acestep.training.dataset_builder_modules.preprocess_audio import load_audio_stereo
++from acestep.training_v2.preprocess_vae import TARGET_SR, tiled_vae_encode
++
++
++DUAL_STREAM_AUDIO_FIELDS = (
++    "motif_seed_audio",
++    "motif_target_audio",
++    "vocal_target_audio",
++)
++
++
++def encode_stem_latents(
++    path: str,
++    vae: Any,
++    dtype: torch.dtype,
++    max_duration: float,
++) -> torch.Tensor:
++    """Load one aligned stem and return its VAE latent sequence on CPU."""
++    audio_path = Path(path)
++    if not audio_path.is_file():
++        raise FileNotFoundError(f"Dual-stream stem not found: {audio_path}")
++    audio, _ = load_audio_stereo(str(audio_path), TARGET_SR, max_duration)
++    audio = audio.unsqueeze(0).to(device=next(vae.parameters()).device, dtype=vae.dtype)
++    with torch.no_grad():
++        return tiled_vae_encode(vae, audio, dtype).squeeze(0).cpu()
+diff --git a/acestep/training_v2/dual_stream_test.py b/acestep/training_v2/dual_stream_test.py
+new file mode 100644
+index 0000000..a9b6db0
+--- /dev/null
++++ b/acestep/training_v2/dual_stream_test.py
+@@ -0,0 +1,48 @@
++"""Unit tests for dual-stream condition construction."""
++
++import unittest
++
++import torch
++
++from acestep.training_v2.dual_stream import (
++    MOTIF_ROLE,
++    VOCAL_ROLE,
++    DualStreamConditioner,
++    masked_adaptive_pool,
++)
++
++
++class DualStreamConditionerTests(unittest.TestCase):
++    """Validate shape and masking behavior without loading ACE-Step weights."""
++
++    def test_masked_pool_ignores_padded_values(self):
++        """Padding must not change pooled values."""
++        latents = torch.tensor([[[2.0], [4.0], [100.0], [100.0]]])
++        mask = torch.tensor([[1, 1, 0, 0]])
++        pooled, pooled_mask = masked_adaptive_pool(latents, mask, max_tokens=1)
++        self.assertTrue(pooled_mask.item())
++        self.assertTrue(torch.allclose(pooled, torch.tensor([[[3.0]]])))
++
++    def test_build_condition_prefixes_role_seed_peer_and_text(self):
++        """Both streams receive distinct role tokens and a combined mask."""
++        conditioner = DualStreamConditioner(latent_dim=2, condition_dim=4, max_tokens=2)
++        base = torch.zeros(1, 3, 4)
++        base_mask = torch.ones(1, 3)
++        seed = torch.ones(1, 4, 2)
++        seed_mask = torch.tensor([[1, 1, 1, 0]])
++        peer = torch.ones(1, 5, 2)
++        peer_mask = torch.ones(1, 5)
++
++        motif, motif_mask = conditioner.build_condition(
++            base, base_mask, seed, seed_mask, peer, peer_mask, MOTIF_ROLE
++        )
++        vocal, vocal_mask = conditioner.build_condition(
++            base, base_mask, seed, seed_mask, peer, peer_mask, VOCAL_ROLE
++        )
++        self.assertEqual(motif.shape, (1, 8, 4))
++        self.assertTrue(torch.equal(motif_mask, vocal_mask))
++        self.assertFalse(torch.equal(motif[:, :1], vocal[:, :1]))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/acestep/training_v2/dual_stream_training.py b/acestep/training_v2/dual_stream_training.py
+new file mode 100644
+index 0000000..9d1ff13
+--- /dev/null
++++ b/acestep/training_v2/dual_stream_training.py
+@@ -0,0 +1,102 @@
++"""Per-step joint flow matching for dual-stream motif/vocal training."""
++
++from __future__ import annotations
++
++from contextlib import nullcontext
++from typing import Any, Dict
++
++import torch
++
++from acestep.training_v2.dual_stream import MOTIF_ROLE, VOCAL_ROLE
++from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
++
++
++def run_dual_stream_training_step(module: Any, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
++    """Compute weighted flow loss for mutually conditioned motif and vocal streams."""
++    if module.device_type in ("cuda", "xpu", "mps") and module.dtype != torch.float32:
++        autocast_ctx = torch.autocast(device_type=module.device_type, dtype=module.dtype)
++    else:
++        autocast_ctx = nullcontext()
++
++    with autocast_ctx:
++        nb = module.transfer_non_blocking
++        motif_target = batch["motif_target_latents"].to(module.device, module.dtype, non_blocking=nb)
++        motif_mask = batch["motif_target_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
++        vocal_target = batch["vocal_target_latents"].to(module.device, module.dtype, non_blocking=nb)
++        vocal_mask = batch["vocal_target_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
++        motif_seed = batch["motif_seed_latents"].to(module.device, module.dtype, non_blocking=nb)
++        motif_seed_mask = batch["motif_seed_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
++        base_condition = batch["encoder_hidden_states"].to(module.device, module.dtype, non_blocking=nb)
++        base_condition_mask = batch["encoder_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
++
++        t, _ = sample_timesteps(
++            batch_size=motif_target.shape[0],
++            device=module.device,
++            dtype=module.dtype,
++            data_proportion=module._data_proportion,
++            timestep_mu=module._timestep_mu,
++            timestep_sigma=module._timestep_sigma,
++            use_meanflow=False,
++        )
++        t_ = t.unsqueeze(-1).unsqueeze(-1)
++        motif_noise, vocal_noise = torch.randn_like(motif_target), torch.randn_like(vocal_target)
++        motif_xt = t_ * motif_noise + (1.0 - t_) * motif_target
++        vocal_xt = t_ * vocal_noise + (1.0 - t_) * vocal_target
++        if module.force_input_grads_for_checkpointing:
++            motif_xt, vocal_xt = motif_xt.requires_grad_(True), vocal_xt.requires_grad_(True)
++
++        conditioner = _get_conditioner(module)
++        motif_condition, motif_condition_mask = conditioner.build_condition(
++            base_condition, base_condition_mask, motif_seed, motif_seed_mask,
++            vocal_xt, vocal_mask, MOTIF_ROLE,
++        )
++        vocal_condition, vocal_condition_mask = conditioner.build_condition(
++            base_condition, base_condition_mask, motif_seed, motif_seed_mask,
++            motif_xt, motif_mask, VOCAL_ROLE,
++        )
++        if module._null_cond_emb is not None and module._cfg_ratio > 0.0:
++            motif_condition = apply_cfg_dropout(motif_condition, module._null_cond_emb, module._cfg_ratio)
++            vocal_condition = apply_cfg_dropout(vocal_condition, module._null_cond_emb, module._cfg_ratio)
++
++        motif_pred = _decode(module, motif_xt, motif_mask, motif_condition, motif_condition_mask, t)
++        vocal_pred = _decode(module, vocal_xt, vocal_mask, vocal_condition, vocal_condition_mask, t)
++        loss = (
++            module.training_config.motif_loss_weight * _masked_flow_loss(motif_pred, motif_noise - motif_target, motif_mask)
++            + module.training_config.vocal_loss_weight * _masked_flow_loss(vocal_pred, vocal_noise - vocal_target, vocal_mask)
++        )
++
++    loss = loss.float()
++    module.training_losses.append(loss.item())
++    return loss
++
++
++def _decode(module: Any, latents: torch.Tensor, mask: torch.Tensor, condition: torch.Tensor, condition_mask: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
++    """Run one stream through the shared DiT with text2music-style zero context."""
++    context = torch.zeros(
++        latents.shape[0], latents.shape[1], latents.shape[2] * 2,
++        device=module.device, dtype=module.dtype,
++    )
++    return module.model.decoder(
++        hidden_states=latents, timestep=t, timestep_r=t, attention_mask=mask,
++        encoder_hidden_states=condition, encoder_attention_mask=condition_mask,
++        context_latents=context,
++    )[0]
++
++
++def _masked_flow_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
++    """Return MSE over valid audio frames, excluding collate padding."""
++    weights = mask.unsqueeze(-1).to(dtype=prediction.dtype)
++    return ((prediction - target).square() * weights).sum() / (
++        weights.sum() * prediction.shape[-1]
++    ).clamp_min(1.0)
++
++
++def _get_conditioner(module: Any) -> Any:
++    """Find the conditioner through optional Fabric wrappers."""
++    decoder = module.model.decoder
++    while hasattr(decoder, "_forward_module"):
++        decoder = decoder._forward_module
++    conditioner = getattr(decoder, "dual_stream_conditioner", None)
++    if conditioner is None:
++        raise RuntimeError("Dual-stream conditioner is not attached to the decoder.")
++    return conditioner
+diff --git a/acestep/training_v2/fixed_lora_module.py b/acestep/training_v2/fixed_lora_module.py
+index cad0c65..35ab413 100644
+--- a/acestep/training_v2/fixed_lora_module.py
++++ b/acestep/training_v2/fixed_lora_module.py
+@@ -29,6 +29,10 @@ from acestep.training.lokr_utils import (
+ 
+ # V2 modules
+ from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, TrainingConfigV2
++from acestep.training_v2.dual_stream import (
++    DualStreamConditioner,
++)
++from acestep.training_v2.dual_stream_training import run_dual_stream_training_step
+ from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
+ from acestep.training_v2.ui import TrainingUpdate
+ 
+@@ -179,6 +183,12 @@ class FixedLoRAModule(nn.Module):
+         else:
+             self._inject_lora(model, adapter_config)  # type: ignore[arg-type]
+ 
++        self.dual_stream_enabled = training_config.dual_stream
++        if self.dual_stream_enabled:
++            if self.adapter_type != "lora":
++                raise ValueError("Dual-stream training currently requires PEFT LoRA adapters.")
++            self._attach_dual_stream_conditioner()
++
+         # Backward-compat alias
+         self.lora_info = self.adapter_info
+ 
+@@ -265,6 +275,26 @@ class FixedLoRAModule(nn.Module):
+             self.device,
+         )
+ 
++    def _attach_dual_stream_conditioner(self) -> None:
++        """Attach trainable motif/peer condition projections to the PEFT decoder."""
++        model_config = self.model.config
++        latent_dim = int(getattr(model_config, "audio_acoustic_hidden_dim", 64))
++        condition_dim = int(
++            getattr(model_config, "encoder_hidden_size", None) or model_config.hidden_size
++        )
++        conditioner = DualStreamConditioner(
++            latent_dim=latent_dim,
++            condition_dim=condition_dim,
++            max_tokens=self.training_config.dual_stream_max_tokens,
++        ).to(device=self.device, dtype=self.dtype)
++        self.model.decoder.add_module("dual_stream_conditioner", conditioner)
++        for parameter in conditioner.parameters():
++            parameter.requires_grad = True
++        logger.info(
++            "[OK] Dual-stream conditioner attached (%d trainable params)",
++            sum(parameter.numel() for parameter in conditioner.parameters()),
++        )
++
+     # -----------------------------------------------------------------------
+     # Training step
+     # -----------------------------------------------------------------------
+@@ -280,6 +310,9 @@ class FixedLoRAModule(nn.Module):
+         Returns:
+             Scalar loss tensor (``float32`` for stable backward).
+         """
++        if self.dual_stream_enabled:
++            return run_dual_stream_training_step(self, batch)
++
+         # Mixed-precision context
+         if self.device_type in ("cuda", "xpu", "mps") and self.dtype != torch.float32:
+             autocast_ctx = torch.autocast(
+diff --git a/acestep/training_v2/preprocess.py b/acestep/training_v2/preprocess.py
+index 8cc3bcc..f3413e4 100644
+--- a/acestep/training_v2/preprocess.py
++++ b/acestep/training_v2/preprocess.py
+@@ -39,6 +39,42 @@ from acestep.training_v2.preprocess_vae import (
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _sample_tensor_stem(audio_file: Path) -> str:
++    """Return a readable tensor filename stem using the song directory name."""
++    return f"{audio_file.parent.name}_{audio_file.stem}"
++
++
++def _has_nonfinite(value: Any) -> bool:
++    """Recursively detect NaN/Inf in a module forward-hook output."""
++    if isinstance(value, torch.Tensor):
++        return value.is_floating_point() and not bool(torch.isfinite(value).all())
++    if isinstance(value, dict):
++        return any(_has_nonfinite(item) for item in value.values())
++    if isinstance(value, (tuple, list)):
++        return any(_has_nonfinite(item) for item in value)
++    return False
++
++
++def _find_first_nonfinite_encoder_module(model: Any, forward: Callable[[], Any]) -> str:
++    """Re-run one bad encoder forward and return its first non-finite stage."""
++    first_bad: List[str] = []
++    handles = []
++    for name, module in model.encoder.named_modules():
++        label = f"encoder.{name}" if name else "encoder"
++
++        def check_output(_module: Any, _inputs: Any, output: Any, label: str = label) -> None:
++            if not first_bad and _has_nonfinite(output):
++                first_bad.append(label)
++
++        handles.append(module.register_forward_hook(check_output))
++    try:
++        forward()
++    finally:
++        for handle in handles:
++            handle.remove()
++    return first_bad[0] if first_bad else "encoder output packing"
++
++
+ # ---------------------------------------------------------------------------
+ # Public API
+ # ---------------------------------------------------------------------------
+@@ -53,6 +89,7 @@ def preprocess_audio_files(
+     dataset_json: Optional[str] = None,
+     device: str = "auto",
+     precision: str = "auto",
++    dual_stream: bool = False,
+     progress_callback: Optional[Callable] = None,
+     cancel_check: Optional[Callable] = None,
+ ) -> Dict[str, Any]:
+@@ -80,6 +117,8 @@ def preprocess_audio_files(
+             audio paths.
+         device: Target device (``"auto"`` to auto-detect).
+         precision: Target precision (``"auto"`` to auto-detect).
++        dual_stream: Also encode motif seed, motif target, and vocal target
++            stems declared in the dataset JSON.
+         progress_callback: ``(current, total, message) -> None``.
+         cancel_check: ``() -> bool`` -- return True to cancel.
+ 
+@@ -96,7 +135,7 @@ def preprocess_audio_files(
+     out_path.mkdir(parents=True, exist_ok=True)
+ 
+     # -- Discover audio files -----------------------------------------------
+-    audio_files = _discover_audio_files(audio_dir, dataset_json)
++    audio_files = _discover_audio_files(audio_dir, dataset_json, dual_stream=dual_stream)
+     if not audio_files:
+         logger.warning("[Side-Step] No audio files found")
+         return {"processed": 0, "failed": 0, "total": 0, "output_dir": str(out_path)}
+@@ -128,6 +167,7 @@ def preprocess_audio_files(
+         max_duration=max_duration,
+         progress_callback=progress_callback,
+         cancel_check=cancel_check,
++        dual_stream=dual_stream,
+     )
+ 
+     # -- Pass 2: DIT Encoder ------------------------------------------------
+@@ -175,6 +215,7 @@ def _pass1_light(
+     max_duration: float,
+     progress_callback: Optional[Callable],
+     cancel_check: Optional[Callable],
++    dual_stream: bool,
+ ) -> tuple[List[Path], int]:
+     """Load audio, VAE-encode, text-encode, save intermediates.
+ 
+@@ -196,6 +237,10 @@ def _pass1_light(
+     )
+     from acestep.training.dataset_builder_modules.preprocess_text import encode_text
+     from acestep.training.dataset_builder_modules.preprocess_lyrics import encode_lyrics
++    from acestep.training_v2.dual_stream_preprocess import (
++        DUAL_STREAM_AUDIO_FIELDS,
++        encode_stem_latents,
++    )
+ 
+     dtype = _resolve_dtype(precision)
+ 
+@@ -234,7 +279,8 @@ def _pass1_light(
+                 progress_callback(i, total, f"[Pass 1] {af.name}")
+ 
+             # Skip if final .pt already exists (resumable)
+-            final_pt = out_path / f"{af.stem}.pt"
++            sample_stem = _sample_tensor_stem(af)
++            final_pt = out_path / f"{sample_stem}.pt"
+             if final_pt.exists():
+                 logger.info("[Side-Step] Skipping (final exists): %s", af.name)
+                 continue
+@@ -251,13 +297,36 @@ def _pass1_light(
+                 # Free raw audio immediately -- no longer needed after VAE encode
+                 del audio
+ 
++                sm = sample_meta.get(str(af.resolve()), sample_meta.get(af.name, {}))
++
++                dual_stream_tensors: Dict[str, torch.Tensor] = {}
++                if dual_stream:
++                    missing = [field for field in DUAL_STREAM_AUDIO_FIELDS if not sm.get(field)]
++                    if missing:
++                        raise ValueError(f"Dual-stream sample is missing stem paths: {missing}")
++                    dual_stream_tensors["motif_target_latents"] = target_latents.squeeze(0).cpu()
++                    dual_stream_tensors["motif_target_attention_mask"] = torch.ones(
++                        target_latents.shape[1], dtype=dtype
++                    )
++                    for field in ("motif_seed_audio", "vocal_target_audio"):
++                        stem = encode_stem_latents(sm[field], vae, dtype, max_duration)
++                        dual_stream_tensors[field.replace("_audio", "_latents")] = stem
++                        dual_stream_tensors[field.replace("_audio", "_attention_mask")] = torch.ones(
++                            stem.shape[0], dtype=dtype
++                        )
++                    vocal_length = dual_stream_tensors["vocal_target_latents"].shape[0]
++                    if vocal_length != target_latents.shape[1]:
++                        raise ValueError(
++                            "motif_target_audio and vocal_target_audio must be time-aligned "
++                            f"({target_latents.shape[1]} vs {vocal_length} latent frames)"
++                        )
++
+                 latent_length = target_latents.shape[1]
+                 attention_mask = torch.ones(
+                     1, latent_length, device=device, dtype=dtype
+                 )
+ 
+                 # 3. Text encode
+-                sm = sample_meta.get(af.name, {})
+                 caption = sm.get("caption", af.stem)
+                 lyrics = sm.get("lyrics", "[Instrumental]")
+ 
+@@ -276,9 +345,8 @@ def _pass1_light(
+                     )
+ 
+                 # 4. Save intermediate
+-                tmp_path = out_path / f"{af.stem}.tmp.pt"
+-                torch.save(
+-                    {
++                tmp_path = out_path / f"{sample_stem}.tmp.pt"
++                intermediate = {
+                         "target_latents": target_latents.squeeze(0).cpu(),
+                         "attention_mask": attention_mask.squeeze(0).cpu(),
+                         "text_hidden_states": text_hs.cpu(),
+@@ -301,9 +369,9 @@ def _pass1_light(
+                             "custom_tag": sm.get("custom_tag", ""),
+                             "prompt_override": sm.get("prompt_override"),
+                         },
+-                    },
+-                    tmp_path,
+-                )
++                    }
++                intermediate.update(dual_stream_tensors)
++                torch.save(intermediate, tmp_path)
+ 
+                 # Free GPU tensors from this iteration before the next one
+                 del target_latents, attention_mask, text_hs, text_mask
+@@ -401,6 +469,16 @@ def _pass2_heavy(
+                 )
+                 latent_length = data["latent_length"]
+ 
++                for name, tensor in (
++                    ("text_hidden_states", text_hs),
++                    ("lyric_hidden_states", lyric_hs),
++                ):
++                    if _has_nonfinite(tensor):
++                        raise FloatingPointError(
++                            f"encoder input {name} already contains NaN/Inf "
++                            f"before the condition encoder (dtype={model_dtype})"
++                        )
++
+                 # DIT encoder pass (adapter-agnostic: same tensors for
+                 # LoRA and LoKR -- only the adapter injection differs).
+                 encoder_hs, encoder_mask = run_encoder(
+@@ -412,6 +490,24 @@ def _pass2_heavy(
+                     device=str(model_device),
+                     dtype=model_dtype,
+                 )
++                if _has_nonfinite(encoder_hs):
++                    stage = _find_first_nonfinite_encoder_module(
++                        model,
++                        lambda: run_encoder(
++                            model,
++                            text_hidden_states=text_hs,
++                            text_attention_mask=text_mask,
++                            lyric_hidden_states=lyric_hs,
++                            lyric_attention_mask=lyric_mask,
++                            device=str(model_device),
++                            dtype=model_dtype,
++                        ),
++                    )
++                    raise FloatingPointError(
++                        "encoder_hidden_states contains NaN/Inf in "
++                        f"{stage} (dtype={model_dtype}, attention="
++                        f"{getattr(model.config, '_attn_implementation', 'unknown')})"
++                    )
+ 
+                 # Free encoder inputs immediately after use
+                 del text_hs, text_mask, lyric_hs, lyric_mask
+@@ -432,17 +528,25 @@ def _pass2_heavy(
+                 base_name = tmp_path.name.replace(".tmp.pt", ".pt")
+                 final_path = out_path / base_name
+                 meta = data["metadata"]
+-                torch.save(
+-                    {
++                final_data = {
+                         "target_latents": data["target_latents"],
+                         "attention_mask": data["attention_mask"],
+                         "encoder_hidden_states": encoder_hs.squeeze(0).cpu(),
+                         "encoder_attention_mask": encoder_mask.squeeze(0).cpu(),
+                         "context_latents": context_latents.squeeze(0).cpu(),
+                         "metadata": meta,
+-                    },
+-                    final_path,
+-                )
++                    }
++                for key in (
++                    "motif_seed_latents",
++                    "motif_seed_attention_mask",
++                    "motif_target_latents",
++                    "motif_target_attention_mask",
++                    "vocal_target_latents",
++                    "vocal_target_attention_mask",
++                ):
++                    if key in data:
++                        final_data[key] = data[key]
++                torch.save(final_data, final_path)
+ 
+                 # Free all GPU tensors and the loaded data dict before next iter
+                 del encoder_hs, encoder_mask, context_latents, data
+diff --git a/acestep/training_v2/preprocess_discovery.py b/acestep/training_v2/preprocess_discovery.py
+index 60f07ee..f6beab0 100644
+--- a/acestep/training_v2/preprocess_discovery.py
++++ b/acestep/training_v2/preprocess_discovery.py
+@@ -24,6 +24,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"}
+ def discover_audio_files(
+     audio_dir: Optional[str],
+     dataset_json: Optional[str],
++    dual_stream: bool = False,
+ ) -> List[Path]:
+     """Discover audio files from a dataset JSON or by scanning a directory.
+ 
+@@ -47,7 +48,11 @@ def discover_audio_files(
+         audio_files: List[Path] = []
+         json_dir = Path(dataset_json).parent  # resolve relative paths vs JSON
+         for entry in samples:
+-            ap = entry.get("audio_path") or entry.get("filename", "")
++            ap = (
++                entry.get("motif_target_audio")
++                if dual_stream
++                else entry.get("audio_path") or entry.get("filename", "")
++            )
+             if not ap:
+                 continue
+             p = Path(ap)
+@@ -106,7 +111,21 @@ def load_sample_metadata(
+         try:
+             raw = json.loads(Path(dataset_json).read_text(encoding="utf-8"))
+             samples = raw if isinstance(raw, list) else raw.get("samples", [])
++            json_dir = Path(dataset_json).parent
+             for s in samples:
++                s = dict(s)
++                for field in (
++                    "audio_path",
++                    "motif_seed_audio",
++                    "motif_target_audio",
++                    "vocal_target_audio",
++                ):
++                    value = s.get(field)
++                    if value and not Path(value).is_absolute():
++                        s[field] = str(json_dir / value)
++                target_path = s.get("audio_path") or s.get("motif_target_audio")
++                if target_path:
++                    meta[str(Path(target_path).resolve())] = s
+                 # Primary key: explicit filename field
+                 fname = s.get("filename", "")
+                 if fname:
+@@ -115,9 +134,9 @@ def load_sample_metadata(
+                     basename = Path(fname).name
+                     if basename != fname and basename not in meta:
+                         meta[basename] = s
+-                elif s.get("audio_path"):
+-                    # Fallback: derive key from audio_path basename
+-                    basename = Path(s["audio_path"]).name
++                elif s.get("audio_path") or s.get("motif_target_audio"):
++                    # Fallback: derive key from the conventional or dual-stream target.
++                    basename = Path(s.get("audio_path") or s["motif_target_audio"]).name
+                     if basename and basename not in meta:
+                         meta[basename] = s
+             logger.info("[Side-Step] Loaded metadata for %d samples from %s", len(meta), dataset_json)
+@@ -126,7 +145,7 @@ def load_sample_metadata(
+ 
+     # Fill defaults for any audio file without metadata
+     for af in audio_files:
+-        if af.name not in meta:
++        if str(af.resolve()) not in meta and af.name not in meta:
+             meta[af.name] = {
+                 "filename": af.name,
+                 "caption": af.stem.replace("_", " ").replace("-", " "),
+diff --git a/acestep/training_v2/trainer_fixed.py b/acestep/training_v2/trainer_fixed.py
+index 9de3c55..0b58bab 100644
+--- a/acestep/training_v2/trainer_fixed.py
++++ b/acestep/training_v2/trainer_fixed.py
+@@ -152,6 +152,7 @@ class FixedLoRATrainer:
+                 prefetch_factor=cfg.prefetch_factor if num_workers > 0 else None,
+                 persistent_workers=cfg.persistent_workers if num_workers > 0 else False,
+                 pin_memory_device=cfg.pin_memory_device,
++                dual_stream=cfg.dual_stream,
+             )
+             data_module.setup("fit")
+ 
+diff --git a/acestep/training_v2/trainer_helpers.py b/acestep/training_v2/trainer_helpers.py
+index b5de03d..83369fc 100644
+--- a/acestep/training_v2/trainer_helpers.py
++++ b/acestep/training_v2/trainer_helpers.py
+@@ -9,6 +9,7 @@ configuration, and module wrapper introspection -- extracted from
+ from __future__ import annotations
+ 
+ import logging
++import json
+ import os
+ from pathlib import Path
+ from typing import Any, Generator, Optional, Tuple
+@@ -183,6 +184,30 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
+             # Fallback for non-PEFT models
+             save_lora_weights(module.model, output_dir)
+ 
++    conditioner = getattr(raw_decoder, "dual_stream_conditioner", None) if trainer.adapter_type != "lokr" else None
++    if conditioner is not None:
++        _save_dual_stream_conditioner(conditioner, output_dir)
++
++
++def _save_dual_stream_conditioner(conditioner: nn.Module, output_dir: str) -> None:
++    """Persist non-PEFT dual-stream conditioner weights beside the LoRA adapter."""
++    config_path = Path(output_dir) / "dual_stream_config.json"
++    weights_path = Path(output_dir) / "dual_stream_conditioner.pt"
++    config_path.write_text(
++        json.dumps(
++            {
++                "schema_version": 1,
++                "latent_dim": conditioner.latent_dim,
++                "condition_dim": conditioner.condition_dim,
++                "max_tokens": conditioner.max_tokens,
++            },
++            indent=2,
++        ) + "\n",
++        encoding="utf-8",
++    )
++    torch.save(conditioner.state_dict(), weights_path)
++    logger.info("[OK] Dual-stream conditioner saved to %s", weights_path)
++
+ 
+ def save_checkpoint(
+     trainer: Any,
+@@ -396,6 +421,7 @@ def resume_checkpoint(
+             if hasattr(decoder, "_forward_module"):
+                 decoder = decoder._forward_module
+             decoder.load_state_dict(state_dict, strict=False)
++            _load_dual_stream_conditioner(module, ckpt_dir)
+ 
+             start_epoch = ckpt_info["epoch"]
+             g_step = ckpt_info["global_step"]
+@@ -414,3 +440,20 @@ def resume_checkpoint(
+         0, 0.0, f"[WARN] No valid checkpoint in {ckpt_dir}", kind="warn"
+     )
+     return None
++
++
++def _load_dual_stream_conditioner(module: Any, checkpoint_dir: Path) -> None:
++    """Restore optional dual-stream conditioner weights during resume."""
++    weights_path = checkpoint_dir / "dual_stream_conditioner.pt"
++    if not weights_path.exists():
++        return
++    decoder = module.model.decoder
++    while hasattr(decoder, "_forward_module"):
++        decoder = decoder._forward_module
++    conditioner = getattr(decoder, "dual_stream_conditioner", None)
++    if conditioner is None:
++        logger.warning("Dual-stream weights found but the current model has no conditioner.")
++        return
++    state = torch.load(weights_path, map_location=module.device, weights_only=True)
++    conditioner.load_state_dict(state)
++    logger.info("[OK] Dual-stream conditioner restored from %s", weights_path)
+diff --git a/train.py b/train.py
+index f28b54e..3d419f6 100644
+--- a/train.py
++++ b/train.py
+@@ -184,6 +184,7 @@ def _run_preprocess(args) -> int:
+             dataset_json=dataset_json,
+             device=getattr(args, "device", "auto"),
+             precision=getattr(args, "precision", "auto"),
++            dual_stream=getattr(args, "dual_stream", False),
+         )
+     except Exception as exc:
+         print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)

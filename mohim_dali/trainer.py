@@ -1,4 +1,4 @@
-"""Thin subprocess wrapper around the existing MOHIM/ACE-Step training CLI."""
+"""Thin subprocess wrapper around the official ACE-Step training CLI."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_REPOSITORY = "https://github.com/youhan200203/MOHIM.git"
+DEFAULT_REPOSITORY = "https://github.com/ace-step/ACE-Step-1.5.git"
+DEFAULT_REVISION = "6d467e4b5081ccb0abf1ec1bf4fdf9051a2d34b0"
 
 
 def _run(command: Iterable[str], *, cwd: str | Path | None = None) -> None:
@@ -34,8 +35,36 @@ def ensure_acestep_repo(
     return destination
 
 
+def apply_acestep_patch(repo_dir: str | Path, patch_file: str | Path) -> None:
+    """Apply the MOHIM dual-stream patch once to an ACE-Step checkout.
+
+    Args:
+        repo_dir: ACE-Step repository checked out at ``DEFAULT_REVISION``.
+        patch_file: Patch containing the MOHIM dual-stream training changes.
+
+    Raises:
+        FileNotFoundError: If the patch file is missing.
+        subprocess.CalledProcessError: If the patch cannot be applied cleanly.
+    """
+    root = Path(repo_dir).expanduser().resolve()
+    patch = Path(patch_file).expanduser().resolve()
+    if not patch.is_file():
+        raise FileNotFoundError(f"ACE-Step patch was not found: {patch}")
+
+    reverse_check = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(patch)],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if reverse_check.returncode == 0:
+        return
+    _run(["git", "apply", "--check", str(patch)], cwd=root)
+    _run(["git", "apply", str(patch)], cwd=root)
+
+
 def install_acestep(repo_dir: str | Path) -> None:
-    """Install the cloned MOHIM fork without rewriting its requirements file."""
+    """Install the patched ACE-Step checkout without rewriting its requirements file."""
 
     root = Path(repo_dir).expanduser().resolve()
     requirements = root / "requirements.txt"
