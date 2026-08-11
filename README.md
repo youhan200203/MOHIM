@@ -27,9 +27,10 @@ DALI는 원본 음원을 함께 배포하지 않는다. 이 프로젝트는 사�
 
 ## Colab 실행
 
-`MOHIM.ipynb` 또는 `notebooks/MOHIM_DALI_v2_LoRA.ipynb`를 Colab에서 열고 셀을
-위에서부터 실행한다. 설치 셀이 두 저장소의 clone과 패치 적용을 처리한다. 첫 실행은
-반드시 `MAX_SONGS = 3`으로 결과를 듣고 확인한다.
+`MOHIM_DALI_v2_LoRA.ipynb`를 Colab에서 열고 셀을 위에서부터 실행한다. 설치 셀이
+두 저장소의 clone과 패치 적용을 처리한다. 첫 실행은 반드시 `MAX_SONGS = 3`으로
+결과를 듣고 확인한다. 기존 로컬 `MOHIM.ipynb`는 이 파이프라인과 분리되어 있으며
+Git에서 추적하지 않는다.
 
 노트북의 설정 셀에서 다음 경로만 수정하면 된다.
 
