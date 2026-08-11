@@ -1,0 +1,224 @@
+"""Select a melodic stem and find a repeated four-bar motif."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+
+
+_F0_DETECTOR: Any = None
+
+
+@dataclass(frozen=True)
+class MotifConfig:
+    candidate_stems: tuple[str, ...] = ("guitar", "piano", "bass", "other")
+    bars: int = 4
+    search_seconds: float = 45.0
+    similarity_threshold: float = 0.56
+    silence_db: float = -40.0
+    min_presence: float = 0.20
+    min_stem_score: float = 0.25
+
+
+def movement_score(midi_notes: Iterable[float], octave_fold: bool = True) -> float:
+    values = np.asarray(list(midi_notes), dtype=np.float64)
+    if len(values) < 2:
+        return 0.0
+    intervals = np.diff(values)
+    if octave_fold:
+        intervals = ((intervals + 6) % 12) - 6
+    absolute = np.abs(intervals)
+    moved_ratio = np.mean(absolute > 0.5)
+    average_interval = np.clip(np.mean(absolute) / 5.0, 0.0, 1.0)
+    pitch_classes = np.round(values).astype(int) % 12
+    unique_ratio = len(set(pitch_classes.tolist())) / len(pitch_classes)
+    return float(0.4 * moved_ratio + 0.3 * average_interval + 0.3 * unique_ratio)
+
+
+def repetition_score(
+    midi_notes: Iterable[float], min_ngram: int = 3, max_ngram: int = 6, octave_fold: bool = True
+) -> float:
+    values = np.asarray(list(midi_notes), dtype=np.float64)
+    if len(values) < min_ngram + 1:
+        return 0.0
+    intervals = np.round(np.diff(values)).astype(int)
+    if octave_fold:
+        intervals = ((intervals + 6) % 12) - 6
+    if not np.any(intervals):
+        return 0.0
+
+    covered = np.zeros(len(intervals), dtype=bool)
+    total_weight = 0.0
+    matched_weight = 0.0
+    for size in range(min_ngram, min(max_ngram, len(intervals)) + 1):
+        positions: dict[tuple[int, ...], list[int]] = {}
+        for start in range(len(intervals) - size + 1):
+            phrase = tuple(intervals[start : start + size])
+            if any(phrase):
+                positions.setdefault(phrase, []).append(start)
+        for starts in positions.values():
+            total_weight += size
+            if len(starts) > 1:
+                matched_weight += size
+                for start in starts:
+                    covered[start : start + size] = True
+    if total_weight == 0:
+        return 0.0
+    return float(0.5 * matched_weight / total_weight + 0.5 * covered.mean())
+
+
+def _extract_midi_notes(mono: np.ndarray, sample_rate: int) -> list[float]:
+    from swift_f0 import SwiftF0, segment_notes
+
+    global _F0_DETECTOR
+    if _F0_DETECTOR is None:
+        _F0_DETECTOR = SwiftF0(fmin=46.875, fmax=2093.75, confidence_threshold=0.9)
+    result = _F0_DETECTOR.detect_from_array(mono.astype(np.float32), sample_rate)
+    notes = segment_notes(
+        result,
+        split_semitone_threshold=0.8,
+        min_note_duration=0.05,
+        unvoiced_grace_period=0.05,
+    )
+    return [float(note.pitch_midi) for note in notes]
+
+
+def score_motif_candidate(stem_wav: Any, full_wav: Any, sample_rate: int, hop_length: int = 512) -> dict[str, float]:
+    import librosa
+
+    stem = stem_wav.mean(0).detach().cpu().numpy()
+    full = full_wav.mean(0).detach().cpu().numpy()
+    peak = max(float(np.max(np.abs(full))), 1e-8)
+    stem = stem / peak
+    full = full / peak
+    stem_rms = librosa.feature.rms(y=stem, hop_length=hop_length)[0]
+    full_rms = librosa.feature.rms(y=full, hop_length=hop_length)[0]
+    active = full_rms > 1e-4
+    if not np.any(active):
+        return {"presence": 0.0, "movement": 0.0, "repetition": 0.0, "total": 0.0}
+
+    contribution = stem_rms[active] / (full_rms[active] + 1e-8)
+    presence = float(0.4 * np.mean(contribution) + 0.6 * np.percentile(contribution, 95))
+    midi_notes = _extract_midi_notes(stem.astype(np.float32), sample_rate) if presence >= 0.20 else []
+    movement = movement_score(midi_notes)
+    repetition = repetition_score(midi_notes)
+    total = 0.5 * presence + 0.25 * movement + 0.25 * repetition
+    return {
+        "presence": presence,
+        "movement": movement,
+        "repetition": repetition,
+        "total": float(total),
+    }
+
+
+def _resize_time(feature: np.ndarray, target_frames: int) -> np.ndarray:
+    old_x = np.linspace(0.0, 1.0, feature.shape[1])
+    new_x = np.linspace(0.0, 1.0, target_frames)
+    return np.vstack([np.interp(new_x, old_x, row) for row in feature])
+
+
+def find_repeating_motif(
+    stem_wav: Any,
+    sample_rate: int,
+    downbeats: Iterable[float],
+    config: MotifConfig,
+) -> tuple[int, int, float] | None:
+    import librosa
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    mono = stem_wav.mean(0).detach().cpu().numpy()
+    downbeats_array = np.asarray(list(downbeats), dtype=np.float64).reshape(-1)
+    if len(downbeats_array) <= config.bars * 2:
+        return None
+    bar_length = float(np.median(np.diff(downbeats_array)))
+    if not np.isfinite(bar_length) or bar_length <= 0:
+        return None
+
+    hop_length = 512
+    motif_length = bar_length * config.bars
+    onset = librosa.onset.onset_strength(y=mono, sr=sample_rate, hop_length=hop_length)
+    chroma = librosa.feature.chroma_cens(y=mono, sr=sample_rate, hop_length=hop_length)
+    rms = librosa.feature.rms(y=mono, hop_length=hop_length)[0]
+    rms_db = librosa.amplitude_to_db(rms + 1e-8, ref=np.max)
+
+    segments: list[tuple[float, float, np.ndarray, np.ndarray, float]] = []
+    for start_sec in downbeats_array:
+        end_sec = start_sec + motif_length
+        if end_sec * sample_rate > len(mono):
+            continue
+        start_frame = int(librosa.time_to_frames(start_sec, sr=sample_rate, hop_length=hop_length))
+        end_frame = int(librosa.time_to_frames(end_sec, sr=sample_rate, hop_length=hop_length))
+        if end_frame - start_frame < 2:
+            continue
+        onset_segment = _resize_time(onset[None, start_frame:end_frame], 64).ravel()
+        chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64).ravel()
+        active = rms_db[start_frame:end_frame] > config.silence_db
+        leading_silence = float(np.flatnonzero(active)[0] / len(active)) if np.any(active) else 1.0
+        segments.append((start_sec, end_sec, onset_segment, chroma_segment, leading_silence))
+
+    best: tuple[int, int, float] | None = None
+    for start_sec, end_sec, first_onset, first_chroma, leading_silence in segments:
+        if start_sec >= config.search_seconds:
+            break
+        scores: list[float] = []
+        for other_start, _, other_onset, other_chroma, _ in segments:
+            if abs(other_start - start_sec) < motif_length * 0.9:
+                continue
+            onset_similarity = cosine_similarity(first_onset[None], other_onset[None])[0, 0]
+            chroma_similarity = cosine_similarity(first_chroma[None], other_chroma[None])[0, 0]
+            scores.append(float(0.3 * onset_similarity + 0.7 * chroma_similarity))
+        if not scores:
+            continue
+        adjusted = max(scores) * (1.0 - leading_silence)
+        if adjusted >= config.similarity_threshold and (best is None or adjusted > best[2]):
+            best = (int(start_sec * sample_rate), int(end_sec * sample_rate), float(adjusted))
+    return best
+
+
+class MotifExtractor:
+    def __init__(self, beat_tracker: Any, config: MotifConfig | None = None) -> None:
+        self.beat_tracker = beat_tracker
+        self.config = config or MotifConfig()
+
+    def select_stem(self, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> tuple[str, dict[str, dict[str, float]]]:
+        scores = {
+            name: score_motif_candidate(stems[name], full_wav, sample_rate)
+            for name in self.config.candidate_stems
+            if name in stems
+        }
+        if not scores:
+            raise ValueError("No configured motif candidate stems were produced by the separator.")
+        name, score = max(scores.items(), key=lambda item: item[1]["total"])
+        if score["presence"] < self.config.min_presence or score["total"] < self.config.min_stem_score:
+            raise ValueError("No motif stem passed the configured presence and score thresholds.")
+        return name, scores
+
+    def extract(self, audio_path: str | Path, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> dict[str, Any]:
+        name, scores = self.select_stem(stems, full_wav, sample_rate)
+        _, downbeats = self.beat_tracker(str(audio_path))
+        match = find_repeating_motif(stems[name], sample_rate, downbeats, self.config)
+        if match is None:
+            raise ValueError("No repeated four-bar motif passed the similarity threshold.")
+        start, end, similarity = match
+        return {
+            "stem_name": name,
+            "stem_scores": scores,
+            "start_frame": start,
+            "end_frame": end,
+            "start_sec": start / sample_rate,
+            "end_sec": end / sample_rate,
+            "similarity": similarity,
+            "audio": stems[name][:, start:end],
+        }
+
+
+def create_beat_tracker(checkpoint_path: str | Path, device: str = "cuda") -> Any:
+    from beat_this.inference import File2Beats
+
+    checkpoint = Path(checkpoint_path).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Beat This checkpoint not found: {checkpoint}")
+    return File2Beats(checkpoint_path=str(checkpoint), device=device, dbn=False)
