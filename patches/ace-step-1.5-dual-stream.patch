@@ -1,5 +1,5 @@
 diff --git a/acestep/training/data_module.py b/acestep/training/data_module.py
-index 68e0b23..0b033e6 100644
+index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed3d6fc9aa 100644
 --- a/acestep/training/data_module.py
 +++ b/acestep/training/data_module.py
 @@ -45,7 +45,7 @@ class PreprocessedTensorDataset(Dataset):
@@ -48,7 +48,7 @@ index 68e0b23..0b033e6 100644
  
  
  def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-@@ -207,7 +219,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+@@ -207,7 +221,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
              eam = torch.cat([eam, pad], dim=0)
          encoder_attention_masks.append(eam)
      
@@ -57,7 +57,7 @@ index 68e0b23..0b033e6 100644
          "target_latents": torch.stack(target_latents),  # [B, T, 64]
          "attention_mask": torch.stack(attention_masks),  # [B, T]
          "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
-@@ -215,6 +227,43 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+@@ -215,6 +229,43 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
          "context_latents": torch.stack(context_latents),  # [B, T, 65]
          "metadata": [s["metadata"] for s in batch],
      }
@@ -101,23 +101,25 @@ index 68e0b23..0b033e6 100644
  
  
  class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
-@@ -234,6 +277,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -234,6 +285,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          persistent_workers: bool = True,
          pin_memory_device: str = "",
          val_split: float = 0.0,
++        split_seed: int = 42,
 +        dual_stream: bool = False,
      ):
          """Initialize the data module.
          
-@@ -255,6 +299,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -255,6 +308,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          self.persistent_workers = persistent_workers
          self.pin_memory_device = pin_memory_device
          self.val_split = val_split
++        self.split_seed = split_seed
 +        self.dual_stream = dual_stream
          
          self.train_dataset = None
          self.val_dataset = None
-@@ -263,7 +308,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -263,15 +318,17 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          """Setup datasets."""
          if stage == 'fit' or stage is None:
              # Create full dataset
@@ -126,12 +128,52 @@ index 68e0b23..0b033e6 100644
              
              # Split if validation requested
              if self.val_split > 0 and len(full_dataset) > 1:
+-                n_val = max(1, int(len(full_dataset) * self.val_split))
++                n_val = max(1, round(len(full_dataset) * self.val_split))
+                 n_train = len(full_dataset) - n_val
+                 
+                 self.train_dataset, self.val_dataset = torch.utils.data.random_split(
+-                    full_dataset, [n_train, n_val]
++                    full_dataset,
++                    [n_train, n_val],
++                    generator=torch.Generator().manual_seed(self.split_seed),
+                 )
+             else:
+                 self.train_dataset = full_dataset
 diff --git a/acestep/training_v2/cli/args.py b/acestep/training_v2/cli/args.py
-index 988ff2a..441b920 100644
+index 988ff2a87e2311a3c99c765e9c7fb3b841340e07..3a73462330292996c803099b461ad0faaa862717 100644
 --- a/acestep/training_v2/cli/args.py
 +++ b/acestep/training_v2/cli/args.py
-@@ -276,6 +276,30 @@ def _add_common_training_args(
-     g_train.add_argument("--scheduler-type", type=str, default="cosine", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine)")
+@@ -259,23 +259,53 @@ def _add_common_training_args(
+         default=_DEFAULT_NUM_WORKERS > 0,
+         help="Keep workers alive between epochs (default: True; False on Windows)",
+     )
++    g_data.add_argument(
++        "--val-split",
++        type=float,
++        default=0.2,
++        help="Fraction of songs reserved for deterministic validation (default: 0.2)",
++    )
+ 
+     # -- Training hyperparams ------------------------------------------------
+     g_train = parser.add_argument_group("Training")
+-    g_train.add_argument("--lr", "--learning-rate", type=float, default=1e-4, dest="learning_rate", help="Initial learning rate (default: 1e-4)")
++    g_train.add_argument("--lr", "--learning-rate", type=float, default=3e-4, dest="learning_rate", help="Initial learning rate (default: 3e-4)")
+     g_train.add_argument("--batch-size", type=int, default=1, help="Training batch size (default: 1)")
+-    g_train.add_argument("--gradient-accumulation", type=int, default=4, help="Gradient accumulation steps (default: 4)")
+-    g_train.add_argument("--epochs", type=int, default=100, help="Maximum training epochs (default: 100)")
++    g_train.add_argument("--gradient-accumulation", type=int, default=1, help="Gradient accumulation steps (default: 1)")
++    g_train.add_argument("--epochs", type=int, default=500, help="Maximum training epochs (default: 500)")
+     g_train.add_argument("--warmup-steps", type=int, default=100, help="LR warmup steps (default: 100)")
+     g_train.add_argument("--weight-decay", type=float, default=0.01, help="AdamW weight decay (default: 0.01)")
+     g_train.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping norm (default: 1.0)")
+     g_train.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+     g_train.add_argument("--shift", type=float, default=3.0, help="Noise schedule shift (turbo=3.0, base/sft=1.0)")
+     g_train.add_argument("--num-inference-steps", type=int, default=8, help="Inference steps for timestep schedule (turbo=8, base/sft=50)")
+-    g_train.add_argument("--optimizer-type", type=str, default="adamw", choices=["adamw", "adamw8bit", "adafactor", "prodigy"], help="Optimizer (default: adamw)")
+-    g_train.add_argument("--scheduler-type", type=str, default="cosine", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine)")
++    g_train.add_argument("--optimizer-type", type=str, default="adamw8bit", choices=["adamw", "adamw8bit", "adafactor", "prodigy"], help="Optimizer (default: adamw8bit; falls back to fused AdamW)")
++    g_train.add_argument("--scheduler-type", type=str, default="cosine_restarts", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine_restarts)")
      g_train.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="Recompute activations to save VRAM (~40-60%% less, ~10-30%% slower). On by default; use --no-gradient-checkpointing to disable")
      g_train.add_argument("--offload-encoder", action=argparse.BooleanOptionalAction, default=False, help="Move encoder/VAE to CPU after setup (saves ~2-4GB VRAM)")
 +    g_train.add_argument(
@@ -161,7 +203,7 @@ index 988ff2a..441b920 100644
  
      # -- Adapter selection ---------------------------------------------------
      g_adapter = parser.add_argument_group("Adapter")
-@@ -288,7 +312,7 @@ def _add_common_training_args(
+@@ -288,7 +318,7 @@ def _add_common_training_args(
      g_lora.add_argument("--dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
      g_lora.add_argument("--target-modules", nargs="+", default=["q_proj", "k_proj", "v_proj", "o_proj"], help="Modules to apply adapter to")
      g_lora.add_argument("--bias", type=str, default="none", choices=["none", "all", "lora_only"], help="Bias training mode (default: none)")
@@ -171,10 +213,18 @@ index 988ff2a..441b920 100644
      # -- LoKR hyperparams ---------------------------------------------------
      g_lokr = parser.add_argument_group("LoKR (used when --adapter-type=lokr)")
 diff --git a/acestep/training_v2/cli/config_builder.py b/acestep/training_v2/cli/config_builder.py
-index 5c3436a..6e82878 100644
+index 5c3436ad7ff4e4312f5657dd04c45a413200c2bb..5f9e7bb7255f76fa089050ade957548c0b75b898 100644
 --- a/acestep/training_v2/cli/config_builder.py
 +++ b/acestep/training_v2/cli/config_builder.py
-@@ -186,6 +186,10 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
+@@ -151,6 +151,7 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
+         pin_memory=args.pin_memory,
+         prefetch_factor=prefetch_factor,
+         persistent_workers=persistent_workers,
++        val_split=getattr(args, "val_split", 0.0),
+         # V2 extensions
+         adapter_type=adapter_type,
+         optimizer_type=getattr(args, "optimizer_type", "adamw"),
+@@ -186,6 +187,10 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
          dataset_json=args.dataset_json,
          tensor_output=args.tensor_output,
          max_duration=args.max_duration,
@@ -186,7 +236,7 @@ index 5c3436a..6e82878 100644
  
      return adapter_cfg, train_cfg
 diff --git a/acestep/training_v2/cli/train_fixed.py b/acestep/training_v2/cli/train_fixed.py
-index 252135e..7072dda 100644
+index 252135e5b858a86d498349d186587d82abc1c1ee..7072dda34968229b827846ab7c2ebf75419b5c45 100644
 --- a/acestep/training_v2/cli/train_fixed.py
 +++ b/acestep/training_v2/cli/train_fixed.py
 @@ -177,6 +177,7 @@ def _run_preprocess(args: argparse.Namespace) -> int:
@@ -198,7 +248,7 @@ index 252135e..7072dda 100644
      except Exception as exc:
          print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)
 diff --git a/acestep/training_v2/configs.py b/acestep/training_v2/configs.py
-index 1f9680a..05bc079 100644
+index 1f9680a850b36f4fec7a36ca43b0d2b8da863496..05bc079fa13ce078b1a31e7dc5f6ea3347c28764 100644
 --- a/acestep/training_v2/configs.py
 +++ b/acestep/training_v2/configs.py
 @@ -231,6 +231,19 @@ class TrainingConfigV2(TrainingConfig):
@@ -223,7 +273,7 @@ index 1f9680a..05bc079 100644
      # -----------------------------------------------------------------------
 diff --git a/acestep/training_v2/dual_stream.py b/acestep/training_v2/dual_stream.py
 new file mode 100644
-index 0000000..c80ba2e
+index 0000000000000000000000000000000000000000..7ab5177b5d2ec2c6f97a8257e4e142a88c5e41bf
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream.py
 @@ -0,0 +1,88 @@
@@ -317,7 +367,7 @@ index 0000000..c80ba2e
 +        return condition, mask.to(dtype=encoder_attention_mask.dtype)
 diff --git a/acestep/training_v2/dual_stream_inference.py b/acestep/training_v2/dual_stream_inference.py
 new file mode 100644
-index 0000000..6b84e0e
+index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eafa9aee087
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_inference.py
 @@ -0,0 +1,127 @@
@@ -450,7 +500,7 @@ index 0000000..6b84e0e
 +    return unconditional + guidance_scale * (conditional - unconditional)
 diff --git a/acestep/training_v2/dual_stream_preprocess.py b/acestep/training_v2/dual_stream_preprocess.py
 new file mode 100644
-index 0000000..d03a550
+index 0000000000000000000000000000000000000000..d03a550482544dd3418df8e40127bc4c8043240a
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_preprocess.py
 @@ -0,0 +1,34 @@
@@ -490,16 +540,19 @@ index 0000000..d03a550
 +        return tiled_vae_encode(vae, audio, dtype).squeeze(0).cpu()
 diff --git a/acestep/training_v2/dual_stream_test.py b/acestep/training_v2/dual_stream_test.py
 new file mode 100644
-index 0000000..a9b6db0
+index 0000000000000000000000000000000000000000..007a0c4c17926c65e5527afccb04dafe650ffca0
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_test.py
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,70 @@
 +"""Unit tests for dual-stream condition construction."""
 +
 +import unittest
++import tempfile
++from pathlib import Path
 +
 +import torch
 +
++from acestep.training.data_module import PreprocessedDataModule
 +from acestep.training_v2.dual_stream import (
 +    MOTIF_ROLE,
 +    VOCAL_ROLE,
@@ -539,15 +592,34 @@ index 0000000..a9b6db0
 +        self.assertTrue(torch.equal(motif_mask, vocal_mask))
 +        self.assertFalse(torch.equal(motif[:, :1], vocal[:, :1]))
 +
++    def test_train_validation_split_is_reproducible(self):
++        """The same seed must preserve the 80/20 song assignment across resumes."""
++        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
++            root = Path(temp_dir)
++            for index in range(10):
++                (root / f"song_{index}.pt").touch()
++            first = PreprocessedDataModule(
++                str(root), val_split=0.2, split_seed=42
++            )
++            second = PreprocessedDataModule(
++                str(root), val_split=0.2, split_seed=42
++            )
++            first.setup("fit")
++            second.setup("fit")
++            self.assertEqual(len(first.train_dataset), 8)
++            self.assertEqual(len(first.val_dataset), 2)
++            self.assertEqual(first.train_dataset.indices, second.train_dataset.indices)
++            self.assertEqual(first.val_dataset.indices, second.val_dataset.indices)
++
 +
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/acestep/training_v2/dual_stream_training.py b/acestep/training_v2/dual_stream_training.py
 new file mode 100644
-index 0000000..9d1ff13
+index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc922b5bff
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_training.py
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,111 @@
 +"""Per-step joint flow matching for dual-stream motif/vocal training."""
 +
 +from __future__ import annotations
@@ -561,7 +633,13 @@ index 0000000..9d1ff13
 +from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
 +
 +
-+def run_dual_stream_training_step(module: Any, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
++def run_dual_stream_training_step(
++    module: Any,
++    batch: Dict[str, torch.Tensor],
++    *,
++    record_loss: bool = True,
++    apply_condition_dropout: bool = True,
++) -> torch.Tensor:
 +    """Compute weighted flow loss for mutually conditioned motif and vocal streams."""
 +    if module.device_type in ("cuda", "xpu", "mps") and module.dtype != torch.float32:
 +        autocast_ctx = torch.autocast(device_type=module.device_type, dtype=module.dtype)
@@ -606,7 +684,7 @@ index 0000000..9d1ff13
 +            vocal_base_condition, vocal_base_condition_mask, motif_seed, motif_seed_mask,
 +            motif_xt, motif_mask, VOCAL_ROLE,
 +        )
-+        if module._null_cond_emb is not None and module._cfg_ratio > 0.0:
++        if apply_condition_dropout and module._null_cond_emb is not None and module._cfg_ratio > 0.0:
 +            motif_condition = apply_cfg_dropout(motif_condition, module._null_cond_emb, module._cfg_ratio)
 +            vocal_condition = apply_cfg_dropout(vocal_condition, module._null_cond_emb, module._cfg_ratio)
 +
@@ -618,7 +696,8 @@ index 0000000..9d1ff13
 +        )
 +
 +    loss = loss.float()
-+    module.training_losses.append(loss.item())
++    if record_loss:
++        module.training_losses.append(loss.item())
 +    return loss
 +
 +
@@ -653,7 +732,7 @@ index 0000000..9d1ff13
 +        raise RuntimeError("Dual-stream conditioner is not attached to the decoder.")
 +    return conditioner
 diff --git a/acestep/training_v2/fixed_lora_module.py b/acestep/training_v2/fixed_lora_module.py
-index cad0c65..35ab413 100644
+index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a79406c56 100644
 --- a/acestep/training_v2/fixed_lora_module.py
 +++ b/acestep/training_v2/fixed_lora_module.py
 @@ -29,6 +29,10 @@ from acestep.training.lokr_utils import (
@@ -680,7 +759,7 @@ index cad0c65..35ab413 100644
          # Backward-compat alias
          self.lora_info = self.adapter_info
  
-@@ -265,6 +275,26 @@ class FixedLoRAModule(nn.Module):
+@@ -265,11 +275,37 @@ class FixedLoRAModule(nn.Module):
              self.device,
          )
  
@@ -707,18 +786,102 @@ index cad0c65..35ab413 100644
      # -----------------------------------------------------------------------
      # Training step
      # -----------------------------------------------------------------------
-@@ -280,6 +310,9 @@ class FixedLoRAModule(nn.Module):
+ 
+-    def training_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
++    def training_step(
++        self,
++        batch: Dict[str, torch.Tensor],
++        *,
++        record_loss: bool = True,
++        apply_condition_dropout: bool = True,
++    ) -> torch.Tensor:
+         """Single training step with corrected timestep sampling + CFG dropout.
+ 
+         Args:
+@@ -280,6 +316,14 @@ class FixedLoRAModule(nn.Module):
          Returns:
              Scalar loss tensor (``float32`` for stable backward).
          """
 +        if self.dual_stream_enabled:
-+            return run_dual_stream_training_step(self, batch)
++            return run_dual_stream_training_step(
++                self,
++                batch,
++                record_loss=record_loss,
++                apply_condition_dropout=apply_condition_dropout,
++            )
 +
          # Mixed-precision context
          if self.device_type in ("cuda", "xpu", "mps") and self.dtype != torch.float32:
              autocast_ctx = torch.autocast(
+@@ -310,7 +354,7 @@ class FixedLoRAModule(nn.Module):
+             bsz = target_latents.shape[0]
+ 
+             # ---- CFG dropout (CORRECTED -- missing in original trainer) ----
+-            if self._null_cond_emb is not None and self._cfg_ratio > 0.0:
++            if apply_condition_dropout and self._null_cond_emb is not None and self._cfg_ratio > 0.0:
+                 encoder_hidden_states = apply_cfg_dropout(
+                     encoder_hidden_states,
+                     self._null_cond_emb,
+@@ -355,5 +399,6 @@ class FixedLoRAModule(nn.Module):
+ 
+         # fp32 for stable backward
+         diffusion_loss = diffusion_loss.float()
+-        self.training_losses.append(diffusion_loss.item())
++        if record_loss:
++            self.training_losses.append(diffusion_loss.item())
+         return diffusion_loss
+diff --git a/acestep/training_v2/optim.py b/acestep/training_v2/optim.py
+index 38e515dbe2ce7632867df8ee4b26163d1ac0e953..e935eb97f2856af445e7bcbba5aa5308ffb39f4b 100644
+--- a/acestep/training_v2/optim.py
++++ b/acestep/training_v2/optim.py
+@@ -54,16 +54,20 @@ def build_optimizer(
+     optimizer_type = optimizer_type.lower().strip()
+ 
+     if optimizer_type == "adamw8bit":
+-        try:
+-            from bitsandbytes.optim import AdamW8bit
+-            logger.info("[Side-Step] Using AdamW8bit optimizer (lower VRAM)")
+-            return AdamW8bit(params, lr=lr, weight_decay=weight_decay)
+-        except ImportError:
+-            logger.warning(
+-                "[Side-Step] bitsandbytes not installed -- falling back to AdamW. "
+-                "Install with: pip install bitsandbytes>=0.45.0"
+-            )
++        if device_type != "cuda":
++            logger.info("[Side-Step] AdamW8bit is CUDA-only -- using AdamW")
+             optimizer_type = "adamw"
++        else:
++            try:
++                from bitsandbytes.optim import AdamW8bit
++                logger.info("[Side-Step] Using AdamW8bit optimizer (lower VRAM)")
++                return AdamW8bit(params, lr=lr, weight_decay=weight_decay)
++            except ImportError:
++                logger.warning(
++                    "[Side-Step] bitsandbytes not installed -- falling back to AdamW. "
++                    "Install with: pip install bitsandbytes>=0.45.0"
++                )
++                optimizer_type = "adamw"
+ 
+     if optimizer_type == "adafactor":
+         try:
+@@ -119,13 +123,14 @@ def build_scheduler(
+     warmup_steps: int = 500,
+     lr: float = 1e-4,
+     optimizer_type: str = "adamw",
+-    n_restarts: int = 4,
++    n_restarts: int = 1,
+ ):
+     """Create a learning rate scheduler from a string key.
+ 
+     Args:
+         n_restarts: Number of cosine restart cycles for the
+             ``cosine_restarts`` scheduler.  Ignored by other types.
++            The default of one matches ACE-Step's official UI scheduler.
+ 
+     When the optimizer is Prodigy, defaults to constant schedule
+     (Prodigy manages LR internally).
 diff --git a/acestep/training_v2/preprocess.py b/acestep/training_v2/preprocess.py
-index 8cc3bcc..f3413e4 100644
+index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61e1ac8129 100644
 --- a/acestep/training_v2/preprocess.py
 +++ b/acestep/training_v2/preprocess.py
 @@ -39,6 +39,42 @@ from acestep.training_v2.preprocess_vae import (
@@ -865,15 +1028,10 @@ index 8cc3bcc..f3413e4 100644
                  caption = sm.get("caption", af.stem)
                  lyrics = sm.get("lyrics", "[Instrumental]")
  
-@@ -270,15 +339,35 @@ def _pass1_light(
-                 with torch.no_grad():
-                     text_hs, text_mask = encode_text(
-                         text_enc, tokenizer, text_prompt, device, dtype
-                     )
-                     lyric_hs, lyric_mask = encode_lyrics(
+@@ -275,10 +344,30 @@ def _pass1_light(
                          text_enc, tokenizer, lyrics, device, dtype
                      )
-+
+ 
 +                dual_stream_text_tensors: Dict[str, torch.Tensor] = {}
 +                if dual_stream:
 +                    ostinato_meta = dict(sm)
@@ -894,7 +1052,6 @@ index 8cc3bcc..f3413e4 100644
 +                        "motif_lyric_hidden_states": motif_lyric_hs.cpu(),
 +                        "motif_lyric_attention_mask": motif_lyric_mask.cpu(),
 +                    }
--
 +
                  # 4. Save intermediate
 -                tmp_path = out_path / f"{af.stem}.tmp.pt"
@@ -905,7 +1062,7 @@ index 8cc3bcc..f3413e4 100644
                          "target_latents": target_latents.squeeze(0).cpu(),
                          "attention_mask": attention_mask.squeeze(0).cpu(),
                          "text_hidden_states": text_hs.cpu(),
-@@ -301,9 +369,10 @@ def _pass1_light(
+@@ -301,9 +390,10 @@ def _pass1_light(
                              "custom_tag": sm.get("custom_tag", ""),
                              "prompt_override": sm.get("prompt_override"),
                          },
@@ -930,7 +1087,7 @@ index 8cc3bcc..f3413e4 100644
 +                    motif_text_mask = data["motif_text_attention_mask"].to(model_device, dtype=model_dtype)
 +                    motif_lyric_hs = data["motif_lyric_hidden_states"].to(model_device, dtype=model_dtype)
 +                    motif_lyric_mask = data["motif_lyric_attention_mask"].to(model_device, dtype=model_dtype)
- 
++
 +                for name, tensor in (
 +                    ("text_hidden_states", text_hs),
 +                    ("lyric_hidden_states", lyric_hs),
@@ -949,7 +1106,7 @@ index 8cc3bcc..f3413e4 100644
 +                            raise FloatingPointError(
 +                                f"encoder input {name} contains NaN/Inf (dtype={model_dtype})"
 +                            )
-+
+ 
                  # DIT encoder pass (adapter-agnostic: same tensors for
                  # LoRA and LoKR -- only the adapter injection differs).
 @@ -412,9 +528,39 @@ def _pass2_heavy(
@@ -989,8 +1146,7 @@ index 8cc3bcc..f3413e4 100644
                  # Free encoder inputs immediately after use
                  del text_hs, text_mask, lyric_hs, lyric_mask
 +                del motif_text_hs, motif_text_mask, motif_lyric_hs, motif_lyric_mask
--
-+
+ 
                  # Build context latents (silence-based, standard text2music)
                  if silence_latent.dim() == 2:
 @@ -432,17 +578,34 @@ def _pass2_heavy(
@@ -1034,7 +1190,7 @@ index 8cc3bcc..f3413e4 100644
                  # Free all GPU tensors and the loaded data dict before next iter
                  del encoder_hs, encoder_mask, context_latents, data
 diff --git a/acestep/training_v2/preprocess_discovery.py b/acestep/training_v2/preprocess_discovery.py
-index 60f07ee..f6beab0 100644
+index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee4125dfaf401 100644
 --- a/acestep/training_v2/preprocess_discovery.py
 +++ b/acestep/training_v2/preprocess_discovery.py
 @@ -24,6 +24,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"}
@@ -1102,30 +1258,215 @@ index 60f07ee..f6beab0 100644
              meta[af.name] = {
                  "filename": af.name,
                  "caption": af.stem.replace("_", " ").replace("-", " "),
+diff --git a/acestep/training_v2/tensorboard_utils.py b/acestep/training_v2/tensorboard_utils.py
+index 64705cc0457dde3f9b15090dbb71ff1b7baa757b..763e2cf23972abd86abdfa4b508b6bcf0f0158f2 100644
+--- a/acestep/training_v2/tensorboard_utils.py
++++ b/acestep/training_v2/tensorboard_utils.py
+@@ -72,6 +72,9 @@ class TrainingLogger:
+     def log_epoch_loss(self, loss: float, epoch: int) -> None:
+         self.log_scalar("train/epoch_loss", loss, epoch)
+ 
++    def log_validation_loss(self, loss: float, epoch: int) -> None:
++        self.log_scalar("validation/loss", loss, epoch)
++
+     def log_grad_norm(self, norm: float, step: int) -> None:
+         self.log_scalar("train/grad_norm", norm, step)
+ 
+diff --git a/acestep/training_v2/trainer_basic_loop.py b/acestep/training_v2/trainer_basic_loop.py
+index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743aed8df8c5 100644
+--- a/acestep/training_v2/trainer_basic_loop.py
++++ b/acestep/training_v2/trainer_basic_loop.py
+@@ -12,6 +12,7 @@ from __future__ import annotations
+ 
+ import logging
+ import math
++import os
+ import time
+ from pathlib import Path
+ from typing import Any, Dict, Generator, List, Optional, Tuple
+@@ -20,7 +21,13 @@ import torch
+ 
+ from acestep.training_v2.optim import build_optimizer, build_scheduler
+ from acestep.training_v2.tensorboard_utils import TrainingLogger
+-from acestep.training_v2.trainer_helpers import configure_memory_features, save_checkpoint, save_final
++from acestep.training_v2.trainer_helpers import (
++    configure_memory_features,
++    mirror_checkpoint_directory,
++    save_checkpoint,
++    save_final,
++    save_rolling_checkpoint,
++)
+ from acestep.training_v2.ui import TrainingUpdate
+ 
+ logger = logging.getLogger(__name__)
+@@ -108,6 +115,7 @@ def run_basic_training_loop(
+ 
+     tb = TrainingLogger(cfg.effective_log_dir)
+     train_loader = data_module.train_dataloader()
++    val_loader = data_module.val_dataloader()
+ 
+     trainable_params = [p for p in module.model.parameters() if p.requires_grad]
+     if not trainable_params:
+@@ -218,18 +226,56 @@ def run_basic_training_loop(
+ 
+         epoch_time = time.time() - epoch_start
+         avg_epoch_loss = epoch_loss / max(num_updates, 1)
++        avg_val_loss = _validation_loss(module, val_loader, cfg)
++        checkpoint_loss = avg_val_loss if avg_val_loss is not None else avg_epoch_loss
+         tb.log_epoch_loss(avg_epoch_loss, epoch + 1)
++        if avg_val_loss is not None:
++            tb.log_validation_loss(avg_val_loss, epoch + 1)
++        loss_summary = f"train={avg_epoch_loss:.4f}"
++        if avg_val_loss is not None:
++            loss_summary += f", validation={avg_val_loss:.4f}"
+         yield TrainingUpdate(
+-            step=global_step, loss=avg_epoch_loss,
+-            msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s",
++            step=global_step, loss=checkpoint_loss,
++            msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s, {loss_summary}",
+             kind="epoch", epoch=epoch + 1, max_epochs=cfg.max_epochs, epoch_time=epoch_time,
+         )
+ 
++        rolling_dir = save_rolling_checkpoint(
++            trainer,
++            optimizer,
++            scheduler,
++            epoch + 1,
++            global_step,
++            output_dir / "resume_latest",
++            train_loss=avg_epoch_loss,
++            val_loss=avg_val_loss,
++        )
++        backup_root = os.environ.get("MOHIM_CHECKPOINT_BACKUP_DIR")
++        if backup_root:
++            mirror_checkpoint_directory(
++                rolling_dir,
++                Path(backup_root) / "resume_latest",
++            )
++
+         if (epoch + 1) % cfg.save_every_n_epochs == 0:
+-            ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{avg_epoch_loss:.4f}")
+-            save_checkpoint(trainer, optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
++            ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{checkpoint_loss:.4f}")
++            save_checkpoint(
++                trainer,
++                optimizer,
++                scheduler,
++                epoch + 1,
++                global_step,
++                ckpt_dir,
++                train_loss=avg_epoch_loss,
++                val_loss=avg_val_loss,
++            )
++            if backup_root:
++                mirror_checkpoint_directory(
++                    ckpt_dir,
++                    Path(backup_root) / Path(ckpt_dir).name,
++                )
+             yield TrainingUpdate(
+-                step=global_step, loss=avg_epoch_loss,
++                step=global_step, loss=checkpoint_loss,
+                 msg=f"[OK] Checkpoint saved at epoch {epoch + 1}",
+                 kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                 checkpoint_path=ckpt_dir,
+@@ -269,3 +315,32 @@ def run_basic_training_loop(
+         ),
+         kind="complete",
+     )
++
++
++def _validation_loss(module: Any, val_loader: Any, cfg: Any) -> Optional[float]:
++    """Evaluate validation with fixed randomness and no condition dropout."""
++    if val_loader is None:
++        return None
++    decoder = module.model.decoder
++    decoder.eval()
++    total_loss = 0.0
++    total_samples = 0
++    cuda_devices = [module.device.index or 0] if module.device_type == "cuda" else []
++    try:
++        with torch.no_grad(), torch.random.fork_rng(devices=cuda_devices):
++            torch.manual_seed(cfg.seed)
++            if module.device_type == "cuda":
++                torch.cuda.manual_seed_all(cfg.seed)
++            for batch in val_loader:
++                loss = module.training_step(
++                    batch,
++                    record_loss=False,
++                    apply_condition_dropout=False,
++                )
++                sample_tensor = batch.get("motif_target_latents", batch["target_latents"])
++                sample_count = int(sample_tensor.shape[0])
++                total_loss += float(loss.item()) * sample_count
++                total_samples += sample_count
++    finally:
++        decoder.train()
++    return total_loss / max(total_samples, 1)
 diff --git a/acestep/training_v2/trainer_fixed.py b/acestep/training_v2/trainer_fixed.py
-index 9de3c55..0b58bab 100644
+index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043ace8b538 100644
 --- a/acestep/training_v2/trainer_fixed.py
 +++ b/acestep/training_v2/trainer_fixed.py
-@@ -20,6 +20,8 @@
+@@ -17,6 +17,7 @@ from __future__ import annotations
+ 
  import logging
  import math
 +import os
  import random
-+import shutil
  import sys
  import time
- from pathlib import Path
-@@ -152,6 +154,7 @@ class FixedLoRATrainer:
+@@ -43,11 +44,13 @@ from acestep.training_v2.fixed_lora_module import (
+ )
+ from acestep.training_v2.trainer_helpers import (
+     configure_memory_features,
++    mirror_checkpoint_directory,
+     offload_non_decoder,
+     resume_checkpoint,
+     save_adapter_flat,
+     save_checkpoint,
+     save_final,
++    save_rolling_checkpoint,
+     verify_saved_adapter,
+ )
+ from acestep.training_v2.trainer_basic_loop import run_basic_training_loop
+@@ -152,6 +155,9 @@ class FixedLoRATrainer:
                  prefetch_factor=cfg.prefetch_factor if num_workers > 0 else None,
                  persistent_workers=cfg.persistent_workers if num_workers > 0 else False,
                  pin_memory_device=cfg.pin_memory_device,
++                val_split=cfg.val_split,
++                split_seed=cfg.seed,
 +                dual_stream=cfg.dual_stream,
              )
              data_module.setup("fit")
  
-@@ -450,11 +453,19 @@ class FixedLoRATrainer:
-                     avg_loss = accumulated_loss * cfg.gradient_accumulation_steps / accumulation_step
-                     _lr = scheduler.get_last_lr()[0]
+@@ -159,7 +165,13 @@ class FixedLoRATrainer:
+                 yield TrainingUpdate(0, 0.0, "[FAIL] No valid samples found in dataset directory", kind="fail")
+                 return
+ 
+-            yield TrainingUpdate(0, 0.0, f"[OK] Loaded {len(data_module.train_dataset)} preprocessed samples", kind="info")
++            val_count = len(data_module.val_dataset) if data_module.val_dataset is not None else 0
++            yield TrainingUpdate(
++                0,
++                0.0,
++                f"[OK] Loaded {len(data_module.train_dataset)} training and {val_count} validation samples",
++                kind="info",
++            )
+ 
+             # -- Dispatch to Fabric or basic loop ---------------------------
+             if _FABRIC_AVAILABLE:
+@@ -297,7 +309,11 @@ class FixedLoRATrainer:
+ 
+         # -- Dataloader -----------------------------------------------------
+         train_loader = data_module.train_dataloader()
+-        train_loader = self.fabric.setup_dataloaders(train_loader)
++        val_loader = data_module.val_dataloader()
++        if val_loader is None:
++            train_loader = self.fabric.setup_dataloaders(train_loader)
++        else:
++            train_loader, val_loader = self.fabric.setup_dataloaders(train_loader, val_loader)
+ 
+         # -- Trainable params / optimizer -----------------------------------
+         trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
+@@ -452,9 +468,17 @@ class FixedLoRATrainer:
                      if is_main and global_step % cfg.log_every == 0:
                          tb.log_loss(avg_loss, global_step)
                          tb.log_lr(_lr, global_step)
@@ -1144,9 +1485,7 @@ index 9de3c55..0b58bab 100644
                              kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
                              steps_per_epoch=steps_per_epoch,
                          )
-@@ -485,11 +496,19 @@ class FixedLoRATrainer:
-                 avg_loss = accumulated_loss * cfg.gradient_accumulation_steps / accumulation_step
-                 _lr = scheduler.get_last_lr()[0]
+@@ -487,9 +511,17 @@ class FixedLoRATrainer:
                  if is_main and global_step % cfg.log_every == 0:
                      tb.log_loss(avg_loss, global_step)
                      tb.log_lr(_lr, global_step)
@@ -1165,30 +1504,131 @@ index 9de3c55..0b58bab 100644
                          kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
                          steps_per_epoch=steps_per_epoch,
                      )
-@@ -515,6 +534,10 @@ class FixedLoRATrainer:
-             if is_main and (epoch + 1) % cfg.save_every_n_epochs == 0:
-                 ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{avg_epoch_loss:.4f}")
-                 self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
+@@ -503,20 +535,56 @@ class FixedLoRATrainer:
+             # End of epoch
+             epoch_time = time.time() - epoch_start
+             avg_epoch_loss = epoch_loss / max(num_updates, 1)
++            avg_val_loss = self._validation_loss(val_loader, cfg, world_size)
++            checkpoint_loss = avg_val_loss if avg_val_loss is not None else avg_epoch_loss
+             if is_main:
+                 tb.log_epoch_loss(avg_epoch_loss, epoch + 1)
++                if avg_val_loss is not None:
++                    tb.log_validation_loss(avg_val_loss, epoch + 1)
++                loss_summary = f"train={avg_epoch_loss:.4f}"
++                if avg_val_loss is not None:
++                    loss_summary += f", validation={avg_val_loss:.4f}"
+                 yield TrainingUpdate(
+-                    step=global_step, loss=avg_epoch_loss,
+-                    msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s, Loss: {avg_epoch_loss:.4f}",
++                    step=global_step, loss=checkpoint_loss,
++                    msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s, {loss_summary}",
+                     kind="epoch", epoch=epoch + 1, max_epochs=cfg.max_epochs, epoch_time=epoch_time,
+                 )
+ 
++                rolling_dir = save_rolling_checkpoint(
++                    self,
++                    optimizer,
++                    scheduler,
++                    epoch + 1,
++                    global_step,
++                    output_dir / "resume_latest",
++                    train_loss=avg_epoch_loss,
++                    val_loss=avg_val_loss,
++                )
 +                backup_root = os.environ.get("MOHIM_CHECKPOINT_BACKUP_DIR")
 +                if backup_root:
++                    mirror_checkpoint_directory(
++                        rolling_dir,
++                        Path(backup_root) / "resume_latest",
++                    )
++
+             # Checkpoint (only rank 0)
+             if is_main and (epoch + 1) % cfg.save_every_n_epochs == 0:
+-                ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{avg_epoch_loss:.4f}")
+-                self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
++                ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{checkpoint_loss:.4f}")
++                save_checkpoint(
++                    self,
++                    optimizer,
++                    scheduler,
++                    epoch + 1,
++                    global_step,
++                    ckpt_dir,
++                    train_loss=avg_epoch_loss,
++                    val_loss=avg_val_loss,
++                )
++                if backup_root:
 +                    backup_dir = Path(backup_root) / Path(ckpt_dir).name
-+                    shutil.copytree(ckpt_dir, backup_dir, dirs_exist_ok=True)
++                    mirror_checkpoint_directory(ckpt_dir, backup_dir)
                  yield TrainingUpdate(
-                     step=global_step, loss=avg_epoch_loss,
+-                    step=global_step, loss=avg_epoch_loss,
++                    step=global_step, loss=checkpoint_loss,
                      msg=f"[OK] Checkpoint saved at epoch {epoch + 1}",
+                     kind="checkpoint", epoch=epoch + 1, max_epochs=cfg.max_epochs,
+                     checkpoint_path=ckpt_dir,
+@@ -565,3 +633,46 @@ class FixedLoRATrainer:
+                 ),
+                 kind="complete",
+             )
++
++    def _validation_loss(
++        self,
++        val_loader: Any,
++        cfg: TrainingConfigV2,
++        world_size: int,
++    ) -> Optional[float]:
++        """Evaluate a fixed-noise validation objective without condition dropout."""
++        if val_loader is None:
++            return None
++        assert self.module is not None
++        decoder = self.module.model.decoder
++        decoder.eval()
++        total_loss = 0.0
++        total_samples = 0
++        cuda_devices = []
++        if self.module.device_type == "cuda":
++            cuda_devices = [self.module.device.index or 0]
++        try:
++            with torch.no_grad(), torch.random.fork_rng(devices=cuda_devices):
++                torch.manual_seed(cfg.seed)
++                if self.module.device_type == "cuda":
++                    torch.cuda.manual_seed_all(cfg.seed)
++                for batch in val_loader:
++                    loss = self.module.training_step(
++                        batch,
++                        record_loss=False,
++                        apply_condition_dropout=False,
++                    )
++                    sample_tensor = batch.get("motif_target_latents", batch["target_latents"])
++                    sample_count = int(sample_tensor.shape[0])
++                    total_loss += float(loss.item()) * sample_count
++                    total_samples += sample_count
++        finally:
++            decoder.train()
++        totals = torch.tensor(
++            [total_loss, float(total_samples)],
++            device=self.module.device,
++            dtype=torch.float64,
++        )
++        if world_size > 1:
++            totals = self.fabric.all_reduce(totals, reduce_op="sum")
++        return float((totals[0] / totals[1].clamp_min(1.0)).item())
 diff --git a/acestep/training_v2/trainer_helpers.py b/acestep/training_v2/trainer_helpers.py
-index b5de03d..83369fc 100644
+index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f59d9981c 100644
 --- a/acestep/training_v2/trainer_helpers.py
 +++ b/acestep/training_v2/trainer_helpers.py
-@@ -9,6 +9,7 @@ configuration, and module wrapper introspection -- extracted from
+@@ -9,7 +9,10 @@ configuration, and module wrapper introspection -- extracted from
  from __future__ import annotations
  
  import logging
 +import json
  import os
++import random
++import shutil
  from pathlib import Path
  from typing import Any, Generator, Optional, Tuple
-@@ -183,6 +184,30 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
+ 
+@@ -183,6 +186,30 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
              # Fallback for non-PEFT models
              save_lora_weights(module.model, output_dir)
  
@@ -1219,18 +1659,192 @@ index b5de03d..83369fc 100644
  
  def save_checkpoint(
      trainer: Any,
-@@ -396,6 +421,7 @@ def resume_checkpoint(
+@@ -191,6 +218,8 @@ def save_checkpoint(
+     epoch: int,
+     global_step: int,
+     ckpt_dir: str,
++    train_loss: Optional[float] = None,
++    val_loss: Optional[float] = None,
+ ) -> None:
+     """Save a resumable checkpoint that is also inference-ready.
+ 
+@@ -207,9 +236,19 @@ def save_checkpoint(
+         "global_step": global_step,
+         "optimizer_state_dict": optimizer.state_dict(),
+         "scheduler_state_dict": scheduler.state_dict(),
++        "train_loss": train_loss,
++        "val_loss": val_loss,
+     }
+     state_path = os.path.join(ckpt_dir, "training_state.pt")
+     torch.save(training_state, state_path)
++    torch.save(
++        {
++            "python_rng_state": random.getstate(),
++            "torch_rng_state": torch.get_rng_state(),
++            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
++        },
++        os.path.join(ckpt_dir, "rng_state.pt"),
++    )
+ 
+     # Also write a safetensors file with epoch/global_step so that
+     # load_training_checkpoint (which reads .safetensors) can restore
+@@ -226,6 +265,21 @@ def save_checkpoint(
+     except Exception as exc:
+         logger.debug("Could not write training_state.safetensors: %s", exc)
+ 
++    config_path = Path(ckpt_dir) / "run_config.json"
++    config_path.write_text(
++        json.dumps(
++            {
++                "schema_version": 1,
++                "fingerprint": _checkpoint_fingerprint(trainer),
++                "train_loss": train_loss,
++                "val_loss": val_loss,
++            },
++            indent=2,
++            sort_keys=True,
++        ) + "\n",
++        encoding="utf-8",
++    )
++
+     logger.info(
+         "Training checkpoint saved to %s (epoch %d, step %d)",
+         ckpt_dir,
+@@ -234,6 +288,88 @@ def save_checkpoint(
+     )
+ 
+ 
++def save_rolling_checkpoint(
++    trainer: Any,
++    optimizer: Any,
++    scheduler: Any,
++    epoch: int,
++    global_step: int,
++    checkpoint_dir: str | Path,
++    *,
++    train_loss: Optional[float] = None,
++    val_loss: Optional[float] = None,
++) -> Path:
++    """Atomically rotate an every-epoch checkpoint, retaining one fallback."""
++    destination = Path(checkpoint_dir)
++    staging = destination.with_name(f"{destination.name}.incomplete")
++    previous = destination.with_name(f"{destination.name}.previous")
++    if staging.exists():
++        shutil.rmtree(staging)
++    save_checkpoint(
++        trainer,
++        optimizer,
++        scheduler,
++        epoch,
++        global_step,
++        str(staging),
++        train_loss=train_loss,
++        val_loss=val_loss,
++    )
++    _rotate_checkpoint_directory(staging, destination, previous)
++    return destination
++
++
++def mirror_checkpoint_directory(source: str | Path, destination: str | Path) -> Path:
++    """Copy a complete checkpoint to durable storage using a two-generation rotation."""
++    source_path = Path(source)
++    destination_path = Path(destination)
++    staging = destination_path.with_name(f"{destination_path.name}.incomplete")
++    previous = destination_path.with_name(f"{destination_path.name}.previous")
++    destination_path.parent.mkdir(parents=True, exist_ok=True)
++    if staging.exists():
++        shutil.rmtree(staging)
++    shutil.copytree(source_path, staging)
++    _rotate_checkpoint_directory(staging, destination_path, previous)
++    return destination_path
++
++
++def _rotate_checkpoint_directory(staging: Path, destination: Path, previous: Path) -> None:
++    if previous.exists():
++        shutil.rmtree(previous)
++    if destination.exists():
++        destination.rename(previous)
++    staging.rename(destination)
++
++
++def _checkpoint_fingerprint(trainer: Any) -> dict:
++    adapter = trainer.adapter_config
++    training = trainer.training_config
++    return {
++        "adapter_type": trainer.adapter_type,
++        "model_variant": training.model_variant,
++        "dual_stream": bool(training.dual_stream),
++        "rank": getattr(adapter, "r", None),
++        "alpha": getattr(adapter, "alpha", None),
++        "dropout": getattr(adapter, "dropout", None),
++        "attention_type": getattr(adapter, "attention_type", None),
++        "target_modules": list(getattr(adapter, "target_modules", [])),
++        "val_split": float(getattr(training, "val_split", 0.0)),
++    }
++
++
++def _validate_checkpoint_fingerprint(trainer: Any, checkpoint_dir: Path) -> None:
++    config_path = checkpoint_dir / "run_config.json"
++    if not config_path.is_file():
++        raise ValueError(f"checkpoint compatibility metadata is missing: {config_path}")
++    saved = json.loads(config_path.read_text(encoding="utf-8")).get("fingerprint")
++    current = _checkpoint_fingerprint(trainer)
++    if saved != current:
++        raise ValueError(
++            "checkpoint configuration does not match this run: "
++            f"saved={saved}, current={current}"
++        )
++
++
+ def save_final(trainer: Any, output_dir: str) -> None:
+     """Save final adapter weights (inference-ready, no training state)."""
+     save_adapter_flat(trainer, output_dir)
+@@ -326,6 +462,8 @@ def resume_checkpoint(
+     lokr_weights_path = ckpt_dir / "lokr_weights.safetensors"
+     state_path = ckpt_dir / "training_state.pt"
+ 
++    _validate_checkpoint_fingerprint(trainer, ckpt_dir)
++
+     if lokr_weights_path.exists() and module.lycoris_net is not None:
+         # LoKR resume
+         if trainer.adapter_type != "lokr":
+@@ -345,6 +483,7 @@ def resume_checkpoint(
+                 optimizer.load_state_dict(state["optimizer_state_dict"])
+             if "scheduler_state_dict" in state:
+                 scheduler.load_state_dict(state["scheduler_state_dict"])
++            _restore_rng_state_file(ckpt_dir)
+             yield TrainingUpdate(
+                 0,
+                 0.0,
+@@ -396,6 +535,9 @@ def resume_checkpoint(
              if hasattr(decoder, "_forward_module"):
                  decoder = decoder._forward_module
              decoder.load_state_dict(state_dict, strict=False)
 +            _load_dual_stream_conditioner(module, ckpt_dir)
++
++            _restore_rng_state_file(ckpt_dir)
  
              start_epoch = ckpt_info["epoch"]
              g_step = ckpt_info["global_step"]
-@@ -414,3 +440,20 @@ def resume_checkpoint(
+@@ -414,3 +556,35 @@ def resume_checkpoint(
          0, 0.0, f"[WARN] No valid checkpoint in {ckpt_dir}", kind="warn"
      )
      return None
++
++
++def _restore_rng_state_file(checkpoint_dir: Path) -> None:
++    rng_path = checkpoint_dir / "rng_state.pt"
++    if not rng_path.is_file():
++        logger.warning("Checkpoint has no RNG state: %s", rng_path)
++        return
++    state = torch.load(str(rng_path), map_location="cpu", weights_only=False)
++    if state.get("python_rng_state") is not None:
++        random.setstate(state["python_rng_state"])
++    if state.get("torch_rng_state") is not None:
++        torch.set_rng_state(state["torch_rng_state"].cpu())
++    cuda_states = state.get("cuda_rng_state_all")
++    if cuda_states is not None and torch.cuda.is_available():
++        torch.cuda.set_rng_state_all(cuda_states)
 +
 +
 +def _load_dual_stream_conditioner(module: Any, checkpoint_dir: Path) -> None:
@@ -1249,7 +1863,7 @@ index b5de03d..83369fc 100644
 +    conditioner.load_state_dict(state)
 +    logger.info("[OK] Dual-stream conditioner restored from %s", weights_path)
 diff --git a/train.py b/train.py
-index f28b54e..3d419f6 100644
+index f28b54e622d360bb7309fd95f1bb7d34078859b4..3d419f6b47e3d667eb50438d368fc9276c460971 100644
 --- a/train.py
 +++ b/train.py
 @@ -184,6 +184,7 @@ def _run_preprocess(args) -> int:
