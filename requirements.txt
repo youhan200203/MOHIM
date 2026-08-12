@@ -1,3 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128; sys_platform == 'linux' and platform_machine == 'x86_64'
+torchvision==0.25.0+cu128; sys_platform == 'linux' and platform_machine == 'x86_64'
+torchaudio==2.10.0+cu128; sys_platform == 'linux' and platform_machine == 'x86_64'
 yt-dlp>=2024.12.23
 lyricsgenius>=3.2.0
 beautifulsoup4>=4.12.3
