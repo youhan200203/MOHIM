@@ -292,7 +292,7 @@ index 0000000..c80ba2e
 +            motif_seed_latents, motif_seed_attention_mask, self.max_tokens
 +        )
 +        peer_tokens, peer_mask = masked_adaptive_pool(
-+            peer_latents, peer_attention_mask, self.max_tokens
++            peer_latents.detach(), peer_attention_mask, self.max_tokens
 +        )
 +        seed_tokens = self.seed_projection(seed_tokens) + self.seed_type_embedding
 +        peer_tokens = self.peer_projection(peer_tokens) + self.peer_type_embedding
@@ -995,7 +995,16 @@ diff --git a/acestep/training_v2/trainer_fixed.py b/acestep/training_v2/trainer_
 index 9de3c55..0b58bab 100644
 --- a/acestep/training_v2/trainer_fixed.py
 +++ b/acestep/training_v2/trainer_fixed.py
-@@ -152,6 +152,7 @@ class FixedLoRATrainer:
+@@ -20,6 +20,8 @@
+ import logging
+ import math
++import os
+ import random
++import shutil
+ import sys
+ import time
+ from pathlib import Path
+@@ -152,6 +154,7 @@ class FixedLoRATrainer:
                  prefetch_factor=cfg.prefetch_factor if num_workers > 0 else None,
                  persistent_workers=cfg.persistent_workers if num_workers > 0 else False,
                  pin_memory_device=cfg.pin_memory_device,
@@ -1003,6 +1012,59 @@ index 9de3c55..0b58bab 100644
              )
              data_module.setup("fit")
  
+@@ -450,11 +453,19 @@ class FixedLoRATrainer:
+                     avg_loss = accumulated_loss * cfg.gradient_accumulation_steps / accumulation_step
+                     _lr = scheduler.get_last_lr()[0]
+                     if is_main and global_step % cfg.log_every == 0:
+                         tb.log_loss(avg_loss, global_step)
+                         tb.log_lr(_lr, global_step)
++                        step_in_epoch = num_updates + 1
++                        epoch_elapsed = time.time() - epoch_start
++                        estimated_epoch_time = epoch_elapsed / step_in_epoch * steps_per_epoch
++                        epoch_eta = max(estimated_epoch_time - epoch_elapsed, 0.0)
++                        total_eta = epoch_eta + estimated_epoch_time * (cfg.max_epochs - epoch - 1)
+                         yield TrainingUpdate(
+                             step=global_step, loss=avg_loss,
+-                            msg=f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}",
++                            msg=(
++                                f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step} ({step_in_epoch}/{steps_per_epoch}), Loss: {avg_loss:.4f}, "
++                                f"Elapsed: {epoch_elapsed / 60:.1f}m, Epoch ETA: {epoch_eta / 60:.1f}m, Total ETA: {total_eta / 3600:.1f}h"
++                            ),
+                             kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
+                             steps_per_epoch=steps_per_epoch,
+                         )
+@@ -485,11 +496,19 @@ class FixedLoRATrainer:
+                 avg_loss = accumulated_loss * cfg.gradient_accumulation_steps / accumulation_step
+                 _lr = scheduler.get_last_lr()[0]
+                 if is_main and global_step % cfg.log_every == 0:
+                     tb.log_loss(avg_loss, global_step)
+                     tb.log_lr(_lr, global_step)
++                    step_in_epoch = num_updates + 1
++                    epoch_elapsed = time.time() - epoch_start
++                    estimated_epoch_time = epoch_elapsed / step_in_epoch * steps_per_epoch
++                    epoch_eta = max(estimated_epoch_time - epoch_elapsed, 0.0)
++                    total_eta = epoch_eta + estimated_epoch_time * (cfg.max_epochs - epoch - 1)
+                     yield TrainingUpdate(
+                         step=global_step, loss=avg_loss,
+-                        msg=f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step}, Loss: {avg_loss:.4f}",
++                        msg=(
++                            f"Epoch {epoch + 1}/{cfg.max_epochs}, Step {global_step} ({step_in_epoch}/{steps_per_epoch}), Loss: {avg_loss:.4f}, "
++                            f"Elapsed: {epoch_elapsed / 60:.1f}m, Epoch ETA: {epoch_eta / 60:.1f}m, Total ETA: {total_eta / 3600:.1f}h"
++                        ),
+                         kind="step", epoch=epoch + 1, max_epochs=cfg.max_epochs, lr=_lr,
+                         steps_per_epoch=steps_per_epoch,
+                     )
+@@ -515,6 +534,10 @@ class FixedLoRATrainer:
+             if is_main and (epoch + 1) % cfg.save_every_n_epochs == 0:
+                 ckpt_dir = str(output_dir / "checkpoints" / f"epoch_{epoch + 1}_loss_{avg_epoch_loss:.4f}")
+                 self._save_checkpoint(optimizer, scheduler, epoch + 1, global_step, ckpt_dir)
++                backup_root = os.environ.get("MOHIM_CHECKPOINT_BACKUP_DIR")
++                if backup_root:
++                    backup_dir = Path(backup_root) / Path(ckpt_dir).name
++                    shutil.copytree(ckpt_dir, backup_dir, dirs_exist_ok=True)
+                 yield TrainingUpdate(
+                     step=global_step, loss=avg_epoch_loss,
+                     msg=f"[OK] Checkpoint saved at epoch {epoch + 1}",
 diff --git a/acestep/training_v2/trainer_helpers.py b/acestep/training_v2/trainer_helpers.py
 index b5de03d..83369fc 100644
 --- a/acestep/training_v2/trainer_helpers.py
