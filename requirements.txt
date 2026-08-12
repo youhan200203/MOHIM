@@ -1,7 +1,7 @@
 yt-dlp>=2024.12.23
 lyricsgenius>=3.2.0
 beautifulsoup4>=4.12.3
-requests>=2.31.0
+requests==2.32.4
 demucs>=4.0.1
 librosa>=0.10.2
 soundfile>=0.12.1
@@ -12,4 +12,5 @@ pandas>=2.0
 einops>=0.8
 soxr>=0.3.7
 rotary-embedding-torch>=0.8
-beat-this @ git+https://github.com/CPJKU/beat_this.git
+torchcodec==0.10.0; sys_platform == 'linux' and platform_machine == 'x86_64'
+torchao==0.16.0; sys_platform == 'linux' and platform_machine == 'x86_64'

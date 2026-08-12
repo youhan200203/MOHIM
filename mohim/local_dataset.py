@@ -21,6 +21,7 @@ class LocalTrack:
     genres: tuple[str, ...]
     language: str
     lyrics: str
+    duration_seconds: float | None
     audio_url: str | None
     audio_path: str | None
     entry: Any
@@ -98,7 +99,7 @@ def _validate_youtube_candidate(
     info: Mapping[str, Any],
     *,
     min_duration: float = 90.0,
-    max_duration: float = 480.0,
+    max_duration: float = 300.0,
 ) -> tuple[bool, str]:
     youtube_title = str(info.get("title") or "").strip()
     normalized_title = " ".join(_normalized_words(youtube_title))
@@ -180,6 +181,7 @@ def ingest_genius_seed(
     *,
     max_tracks: int | None = None,
     search_results: int = 8,
+    max_duration_seconds: float = 300.0,
 ) -> dict[str, Any]:
     """Pair seed lyrics with downloadable YouTube audio and save after every track."""
 
@@ -187,6 +189,8 @@ def ingest_genius_seed(
         raise ValueError("max_tracks must be positive or None")
     if search_results <= 0:
         raise ValueError("search_results must be positive")
+    if max_duration_seconds <= 0:
+        raise ValueError("max_duration_seconds must be positive")
 
     seed = _read_json(Path(seed_path).expanduser().resolve())
     candidates = list(seed["tracks"])
@@ -197,8 +201,19 @@ def ingest_genius_seed(
     audio_dir = root / "audio"
     manifest_path = root / "tracks.json"
     previous = _read_json(manifest_path) if manifest_path.is_file() else {"tracks": []}
-    existing = {str(item.get("seed_id") or item.get("track_id") or item.get("id")): dict(item) for item in previous["tracks"]}
+    previous_tracks = [
+        dict(item)
+        for item in previous["tracks"]
+        if item.get("duration_seconds") is None
+        or float(item["duration_seconds"]) <= max_duration_seconds
+    ]
+    excluded_existing = len(previous["tracks"]) - len(previous_tracks)
+    existing = {
+        str(item.get("seed_id") or item.get("track_id") or item.get("id")): item
+        for item in previous_tracks
+    }
     errors: list[dict[str, str]] = []
+    skipped: list[dict[str, Any]] = []
     interrupted = False
 
     def save() -> dict[str, Any]:
@@ -210,10 +225,13 @@ def ingest_genius_seed(
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "num_tracks": len(tracks),
                 "num_errors": len(errors),
+                "num_skipped": len(skipped) + excluded_existing,
+                "max_duration_seconds": max_duration_seconds,
                 "interrupted": interrupted,
             },
             "tracks": tracks,
             "errors": errors,
+            "skipped": skipped,
         }
         _write_json(manifest_path, payload)
         return payload
@@ -233,14 +251,21 @@ def ingest_genius_seed(
             lyrics = str(seed_track.get("lyrics") or "").strip()
             query = f"{artist} {title} official audio"
             failures: list[str] = []
+            rejected_for_duration = False
             try:
                 if not artist or not title or not lyrics:
                     raise ValueError("seed track must contain artist, title, and lyrics")
                 downloaded: dict[str, Any] | None = None
                 selected_url = ""
                 for result in _search_youtube(query, search_results):
-                    accepted, reason = _validate_youtube_candidate(artist, title, result)
+                    accepted, reason = _validate_youtube_candidate(
+                        artist,
+                        title,
+                        result,
+                        max_duration=max_duration_seconds,
+                    )
                     if not accepted:
+                        rejected_for_duration |= reason.startswith("duration is outside")
                         failures.append(reason)
                         continue
                     selected_url = _youtube_url(result)
@@ -252,8 +277,41 @@ def ingest_genius_seed(
                         break
                     except Exception as exc:
                         failures.append(f"{type(exc).__name__}: {exc}")
+                if downloaded is None and rejected_for_duration:
+                    skipped.append(
+                        {
+                            "seed_id": seed_id,
+                            "artist": artist,
+                            "title": title,
+                            "reason": f"duration exceeds {max_duration_seconds:g} seconds",
+                        }
+                    )
+                    save()
+                    print(
+                        f"[{index}/{len(candidates)}] {artist} - {title}: skipped (over {max_duration_seconds:g}s)",
+                        flush=True,
+                    )
+                    continue
                 if downloaded is None:
                     raise RuntimeError("no downloadable matching result; " + " | ".join(failures[-5:]))
+
+                downloaded_duration = downloaded.get("duration")
+                if downloaded_duration is not None and float(downloaded_duration) > max_duration_seconds:
+                    skipped.append(
+                        {
+                            "seed_id": seed_id,
+                            "artist": artist,
+                            "title": title,
+                            "duration_seconds": float(downloaded_duration),
+                            "reason": f"duration exceeds {max_duration_seconds:g} seconds",
+                        }
+                    )
+                    save()
+                    print(
+                        f"[{index}/{len(candidates)}] {artist} - {title}: skipped ({float(downloaded_duration):.1f}s)",
+                        flush=True,
+                    )
+                    continue
 
                 existing[seed_id] = {
                     "track_id": seed_id,
@@ -291,10 +349,22 @@ def ingest_genius_seed(
     return save()
 
 
-def load_local_tracks(manifest_path: str | Path, *, require_lyrics: bool = True) -> list[LocalTrack]:
+def load_local_tracks(
+    manifest_path: str | Path,
+    *,
+    require_lyrics: bool = True,
+    max_duration_seconds: float | None = None,
+) -> list[LocalTrack]:
     payload = _read_json(Path(manifest_path).expanduser().resolve())
     tracks: list[LocalTrack] = []
     for item in payload["tracks"]:
+        duration = item.get("duration_seconds")
+        if (
+            max_duration_seconds is not None
+            and duration is not None
+            and float(duration) > max_duration_seconds
+        ):
+            continue
         lyrics = str(item.get("lyrics") or "").strip()
         if require_lyrics and not lyrics:
             continue
@@ -309,6 +379,7 @@ def load_local_tracks(manifest_path: str | Path, *, require_lyrics: bool = True)
                 genres=tuple(str(value).strip() for value in genres if str(value).strip()),
                 language=str(item.get("language") or "").strip(),
                 lyrics=lyrics,
+                duration_seconds=float(duration) if duration is not None else None,
                 audio_url=str(item.get("source_url") or "") or None,
                 audio_path=str(item.get("audio_path") or "") or None,
                 entry=item,

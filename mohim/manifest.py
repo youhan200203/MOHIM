@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 
 def build_dual_stream_manifest(
     processed_dir: str | Path,
     output_path: str | Path,
     *,
-    caption_template: str = "English pop song with a recurring {motif_stem} motif",
+    allowed_track_ids: Collection[str] | None = None,
+    caption_template: str = "{language} {genre} song featuring lead vocals and a recurring {motif_stem} instrumental motif",
 ) -> dict[str, Any]:
     root = Path(processed_dir).expanduser().resolve()
+    allowed = {str(track_id) for track_id in allowed_track_ids} if allowed_track_ids is not None else None
     samples: list[dict[str, Any]] = []
     skipped: list[str] = []
 
@@ -21,6 +23,8 @@ def build_dual_stream_manifest(
         sample_dir = metadata_path.parent
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("status") != "accepted":
+            continue
+        if allowed is not None and str(metadata.get("track_id")) not in allowed:
             continue
         lyrics_path = sample_dir / "lyrics.txt"
         motif_seed = sample_dir / metadata["motif_seed_file"]
@@ -35,6 +39,14 @@ def build_dual_stream_manifest(
             continue
 
         motif_stem = metadata["motif_stem"]
+        genres = metadata.get("genres") or ["pop"]
+        genre = str(genres[0] if isinstance(genres, list) else genres).strip().lower() or "pop"
+        language = str(metadata.get("language") or "English").strip()
+        caption = caption_template.format(
+            language=language,
+            genre=genre,
+            motif_stem=motif_stem,
+        )
         samples.append(
             {
                 "motif_target_audio": str(motif_target),
@@ -42,7 +54,7 @@ def build_dual_stream_manifest(
                 "vocal_target_audio": str(vocal_target),
                 "audio_path": str(motif_target),
                 "filename": f"{metadata['track_id']}_{motif_stem}{motif_target.suffix}",
-                "caption": caption_template.format(motif_stem=motif_stem),
+                "caption": caption,
                 "lyrics": lyrics,
                 "bpm": None,
                 "keyscale": "",

@@ -86,7 +86,7 @@ def preprocess_dual_stream(
     checkpoint_dir: str | Path,
     tensor_dir: str | Path,
     model_variant: str = "base",
-    max_duration: float = 240.0,
+    max_duration: float = 300.0,
     device: str = "cuda",
     precision: str = "bf16",
 ) -> None:
