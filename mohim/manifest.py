@@ -12,7 +12,9 @@ def build_dual_stream_manifest(
     output_path: str | Path,
     *,
     allowed_track_ids: Collection[str] | None = None,
-    caption_template: str = "{language} {genre} song featuring lead vocals and a recurring {motif_stem} instrumental motif",
+    caption_template: str | None = None,
+    ostinato_caption_template: str = "Isolated {motif_stem} stem performing a recurring ostinato in a {genre} style. {motif_stem_title} only; no vocals and no other instruments.",
+    vocal_caption_template: str = "Isolated vocal stem for an {language} {genre} song, singing the provided lyrics. Vocals only; no instrumental accompaniment and no musical instruments.",
 ) -> dict[str, Any]:
     root = Path(processed_dir).expanduser().resolve()
     allowed = {str(track_id) for track_id in allowed_track_ids} if allowed_track_ids is not None else None
@@ -42,11 +44,15 @@ def build_dual_stream_manifest(
         genres = metadata.get("genres") or ["pop"]
         genre = str(genres[0] if isinstance(genres, list) else genres).strip().lower() or "pop"
         language = str(metadata.get("language") or "English").strip()
-        caption = caption_template.format(
-            language=language,
-            genre=genre,
-            motif_stem=motif_stem,
-        )
+        prompt_fields = {
+            "language": language,
+            "genre": genre,
+            "motif_stem": motif_stem,
+            "motif_stem_title": motif_stem.capitalize(),
+        }
+        ostinato_caption = ostinato_caption_template.format(**prompt_fields)
+        active_vocal_template = vocal_caption_template if caption_template is None else caption_template
+        vocal_caption = active_vocal_template.format(**prompt_fields)
         samples.append(
             {
                 "motif_target_audio": str(motif_target),
@@ -54,8 +60,12 @@ def build_dual_stream_manifest(
                 "vocal_target_audio": str(vocal_target),
                 "audio_path": str(motif_target),
                 "filename": f"{metadata['track_id']}_{motif_stem}{motif_target.suffix}",
-                "caption": caption,
+                "caption": vocal_caption,
                 "lyrics": lyrics,
+                "ostinato_caption": ostinato_caption,
+                "ostinato_lyrics": "[Instrumental]",
+                "vocal_caption": vocal_caption,
+                "vocal_lyrics": lyrics,
                 "bpm": None,
                 "keyscale": "",
                 "timesignature": "",
