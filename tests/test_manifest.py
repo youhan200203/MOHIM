@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mohim_dali.manifest import build_dual_stream_manifest
+from mohim.manifest import build_dual_stream_manifest
 
 
 class ManifestTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class ManifestTests(unittest.TestCase):
             (sample / "lyrics.txt").write_text("hello world\n", encoding="utf-8")
             metadata = {
                 "status": "accepted",
-                "dali_id": "abc",
+                "track_id": "abc",
                 "artist": "Artist",
                 "title": "Title",
                 "motif_stem": "guitar",

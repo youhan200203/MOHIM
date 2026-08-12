@@ -1,6 +1,6 @@
 import unittest
 
-from mohim_dali.motif import movement_score, repetition_score
+from mohim.motif import movement_score, repetition_score
 
 
 class MotifScoreTests(unittest.TestCase):

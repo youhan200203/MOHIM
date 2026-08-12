@@ -1,4 +1,4 @@
-"""Resumable DALI-to-MOHIM audio dataset builder."""
+"""Resumable MOHIM audio dataset builder."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .dali import DaliTrack, index_audio_files, resolve_audio_path
+from .local_dataset import LocalTrack, index_audio_files, resolve_audio_path
 from .motif import MotifExtractor
 from .separator import StemSeparator, save_audio
 
 
 @dataclass(frozen=True)
 class BuildResult:
-    dali_id: str
+    track_id: str
     status: str
     reason: str | None
     output_dir: str | None
@@ -41,7 +41,7 @@ class DatasetBuilder:
             raise ValueError("audio_format must be either 'flac' or 'wav'.")
         self.resume = resume
 
-    def _accepted_result(self, track: DaliTrack, sample_dir: Path) -> BuildResult | None:
+    def _accepted_result(self, track: LocalTrack, sample_dir: Path) -> BuildResult | None:
         metadata_path = sample_dir / "metadata.json"
         if not self.resume or not metadata_path.is_file():
             return None
@@ -56,20 +56,20 @@ class DatasetBuilder:
             sample_dir / "lyrics.txt",
         ]
         if metadata.get("status") == "accepted" and all(path.is_file() for path in required):
-            return BuildResult(track.dali_id, "skipped", "already_processed", str(sample_dir), metadata.get("motif_stem"))
+            return BuildResult(track.track_id, "skipped", "already_processed", str(sample_dir), metadata.get("motif_stem"))
         return None
 
-    def process_track(self, track: DaliTrack, audio_index: dict[str, Path]) -> BuildResult:
-        sample_dir = self.output_dir / track.dali_id
+    def process_track(self, track: LocalTrack, audio_index: dict[str, Path]) -> BuildResult:
+        sample_dir = self.output_dir / track.track_id
         cached = self._accepted_result(track, sample_dir)
         if cached:
             return cached
 
         audio_path = resolve_audio_path(track, audio_index)
         if audio_path is None:
-            return BuildResult(track.dali_id, "rejected", "audio_not_found", None, None)
+            return BuildResult(track.track_id, "rejected", "audio_not_found", None, None)
         if not track.lyrics.strip():
-            return BuildResult(track.dali_id, "rejected", "lyrics_missing", None, None)
+            return BuildResult(track.track_id, "rejected", "lyrics_missing", None, None)
 
         try:
             stems, sample_rate, mixture = self.separator.separate(audio_path)
@@ -77,7 +77,7 @@ class DatasetBuilder:
                 raise ValueError("Separator did not return a vocals stem.")
             motif = self.motif_extractor.extract(audio_path, stems, mixture, sample_rate)
         except Exception as exc:  # keep a large batch running and report the exact cause
-            return BuildResult(track.dali_id, "rejected", f"{type(exc).__name__}: {exc}", None, None)
+            return BuildResult(track.track_id, "rejected", f"{type(exc).__name__}: {exc}", None, None)
 
         sample_dir.mkdir(parents=True, exist_ok=True)
         extension = self.audio_format
@@ -92,7 +92,7 @@ class DatasetBuilder:
 
         metadata: dict[str, Any] = {
             "status": "accepted",
-            "dali_id": track.dali_id,
+            "track_id": track.track_id,
             "artist": track.artist,
             "title": track.title,
             "genres": list(track.genres),
@@ -111,9 +111,9 @@ class DatasetBuilder:
         (sample_dir / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        return BuildResult(track.dali_id, "accepted", None, str(sample_dir), motif["stem_name"])
+        return BuildResult(track.track_id, "accepted", None, str(sample_dir), motif["stem_name"])
 
-    def build(self, tracks: Iterable[DaliTrack], *, max_songs: int | None = None) -> list[BuildResult]:
+    def build(self, tracks: Iterable[LocalTrack], *, max_songs: int | None = None) -> list[BuildResult]:
         from tqdm.auto import tqdm
 
         self.output_dir.mkdir(parents=True, exist_ok=True)

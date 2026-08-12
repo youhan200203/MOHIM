@@ -27,11 +27,11 @@ def build_dual_stream_manifest(
         motif_target = sample_dir / metadata["motif_target_file"]
         vocal_target = sample_dir / metadata["vocal_target_file"]
         if not all(path.is_file() for path in (lyrics_path, motif_seed, motif_target, vocal_target)):
-            skipped.append(metadata.get("dali_id", sample_dir.name))
+            skipped.append(metadata.get("track_id", sample_dir.name))
             continue
         lyrics = lyrics_path.read_text(encoding="utf-8").strip()
         if not lyrics:
-            skipped.append(metadata.get("dali_id", sample_dir.name))
+            skipped.append(metadata.get("track_id", sample_dir.name))
             continue
 
         motif_stem = metadata["motif_stem"]
@@ -41,14 +41,14 @@ def build_dual_stream_manifest(
                 "motif_seed_audio": str(motif_seed),
                 "vocal_target_audio": str(vocal_target),
                 "audio_path": str(motif_target),
-                "filename": f"{metadata['dali_id']}_{motif_stem}{motif_target.suffix}",
+                "filename": f"{metadata['track_id']}_{motif_stem}{motif_target.suffix}",
                 "caption": caption_template.format(motif_stem=motif_stem),
                 "lyrics": lyrics,
                 "bpm": None,
                 "keyscale": "",
                 "timesignature": "",
                 "is_instrumental": False,
-                "dali_id": metadata["dali_id"],
+                "track_id": metadata["track_id"],
                 "artist": metadata.get("artist", ""),
                 "title": metadata.get("title", ""),
                 "motif_stem": motif_stem,
@@ -59,7 +59,7 @@ def build_dual_stream_manifest(
 
     manifest = {
         "metadata": {
-            "name": "dali_v2_mohim_dual_stream",
+            "name": "mohim_youtube_dual_stream",
             "num_samples": len(samples),
             "skipped": skipped,
         },

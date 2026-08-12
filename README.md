@@ -1,67 +1,79 @@
-# MOHIM: DALI v2 → motif dual-stream LoRA
+# MOHIM: Genius seed → YouTube → Demucs → ACE-Step LoRA
 
-DALI v2의 영어 Pop 곡에서 반복 모티프를 골라 ACE-Step 1.5용 dual-stream LoRA
-데이터를 만드는 Colab 연구 파이프라인이다.
+Genius에서 만든 가사 seed JSON과 YouTube 음원을 연결하고, HTDemucs 6-stem 분리와
+반복 모티프 추출을 거쳐 ACE-Step 1.5 dual-stream LoRA 데이터를 만드는 연구
+파이프라인이다.
 
-## 저장소 구조
+## 1. 로컬 Mac에서 가사 seed 생성
 
-MOHIM은 데이터셋 구축 코드와 노트북만 관리한다. ACE-Step 본체를 복제해서 보관하지
-않으며, Colab에서 다음 순서로 실행 환경을 구성한다.
+Genius 수집은 Colab 노트북과 분리되어 있다. 로컬에서 다음 명령을 실행한다.
 
-1. 공식 `ace-step/ACE-Step-1.5`를 호환 커밋으로 clone
-2. `youhan200203/MOHIM`의 `working` 브랜치를 clone
-3. `patches/ace-step-1.5-dual-stream.patch`를 공식 ACE-Step checkout에 적용
-4. 패치된 ACE-Step에서 전처리와 LoRA 학습 실행
-
-호환 기준 커밋은 `6d467e4b5081ccb0abf1ec1bf4fdf9051a2d34b0`이다. 공식 저장소의
-최신 HEAD에 임의로 패치를 적용하지 않는다.
-
-## 준비물
-
-1. Zenodo에서 비상업 연구 목적으로 접근 승인을 받은 DALI v2 annotation 디렉터리
-2. DALI ID를 파일명으로 사용하는 로컬 음원 디렉터리
-3. NVIDIA CUDA 런타임과 충분한 Google Drive 공간
-
-DALI는 원본 음원을 함께 배포하지 않는다. 이 프로젝트는 사용자가 적법하게 확보해 둔
-로컬 음원만 처리하며 YouTube 자동 다운로드 기능을 제공하지 않는다.
-
-## Colab 실행
-
-`MOHIM_DALI_v2_LoRA.ipynb`를 Colab에서 열고 셀을 위에서부터 실행한다. 설치 셀이
-두 저장소의 clone과 패치 적용을 처리한다. 첫 실행은 반드시 `MAX_SONGS = 3`으로
-결과를 듣고 확인한다. 기존 로컬 `MOHIM.ipynb`는 이 파이프라인과 분리되어 있으며
-Git에서 추적하지 않는다.
-
-노트북의 설정 셀에서 다음 경로만 수정하면 된다.
-
-```python
-DALI_DATA_DIR = "/content/drive/MyDrive/MOHIM/dali_v2"
-DALI_AUDIO_DIR = "/content/drive/MyDrive/MOHIM/dali_audio"
-OUTPUT_DIR = "/content/drive/MyDrive/MOHIM/dali_motif_dataset"
+```bash
+python3 -m pip install -r requirements.txt
+python3 export_genius_seed.py --max-tracks 100 --max-pages 50
 ```
 
-## 저장 공간
+토큰은 프롬프트에 입력하거나 `GENIUS_ACCESS_TOKEN` 환경 변수로 전달한다. 기본 출력은
+저장소 루트의 `genius_pop_seed.json`이다. 곡마다 즉시 저장되므로 중간에 중단해도 완료된
+가사는 남는다. 이 단계에서는 YouTube 검색이나 음원 다운로드를 하지 않는다.
 
-DALI v2는 전체 488.1시간이다. 압축 원본이 128–256 kbps라면 약 28–56GB지만, 이를
-44.1kHz stereo PCM-16 WAV로 풀면 스트림 하나가 약 310GB가 된다. 이 파이프라인은
-Demucs의 여섯 스템을 모두 저장하지 않고 `vocals`, 선택된 전체 motif stem, 4마디
-`motif`만 FLAC으로 저장한다. 그래도 전체 처리에는 수백 GB가 필요할 수 있으므로 먼저
-작은 subset으로 필요한 실제 용량을 측정한다.
-
-## 출력
+생성한 파일을 Google Drive의 다음 위치에 올린다.
 
 ```text
-<OUTPUT_DIR>/<DALI_ID>/
+MyDrive/MOHIM/genius_pop_dataset/genius_pop_seed.json
+```
+
+## 2. Colab에서 음원과 학습 데이터 생성
+
+[MOHIM_LoRA.ipynb](MOHIM_LoRA.ipynb)을 Colab에서 열고 위에서부터 실행한다.
+
+```text
+genius_pop_seed.json
+→ YouTube 후보 검색 및 음원 다운로드
+→ HTDemucs 6-stem 분리
+→ 반복 4마디 모티프 선택
+→ dual_stream_manifest.json 생성
+→ ACE-Step tensor 전처리
+→ LoRA 학습
+```
+
+다운로드 결과는 다음처럼 Drive에 저장된다.
+
+```text
+MyDrive/MOHIM/genius_pop_dataset/
+├── genius_pop_seed.json
+├── tracks.json
+└── audio/
+```
+
+`tracks.json`은 곡마다 갱신된다. unavailable 영상은 다음 검색 후보로 넘어가고, 이미 받은
+음원은 재실행 시 건너뛴다.
+
+Demucs 처리 결과는 다음처럼 저장된다.
+
+```text
+MyDrive/MOHIM/motif_dataset/<TRACK_ID>/
 ├── vocals.flac
-├── guitar.flac          # 곡에 따라 piano/bass/other
+├── guitar.flac          # 곡에 따라 piano, bass 또는 other
 ├── motif.flac
 ├── lyrics.txt
 └── metadata.json
 ```
 
-`build_report.jsonl`에는 채택 및 제외 사유가 기록되고, `dual_stream_manifest.json`은
-MOHIM의 `train.py fixed --dual-stream` 전처리에 전달된다. 완료된 샘플은 다시 실행해도
-건너뛴다.
+처음에는 노트북의 `MAX_SONGS = 3`으로 결과를 듣고 확인한 뒤 전체 처리 시 `None`으로
+바꾼다. 완성된 샘플은 다시 실행해도 건너뛴다.
+
+## 3. ACE-Step
+
+노트북은 공식 `ace-step/ACE-Step-1.5`를 호환 커밋
+`6d467e4b5081ccb0abf1ec1bf4fdf9051a2d34b0`으로 고정하고
+`patches/ace-step-1.5-dual-stream.patch`를 적용한다.
+
+## 사용 조건
+
+Genius 가사와 YouTube 음원의 이용 권한은 별도로 확인해야 한다. 연구 목적 자체가 복제나
+다운로드 권한을 자동으로 부여하지 않으므로, 사용자가 접근·저장·학습할 권한이 있는 자료만
+사용한다.
 
 ## 테스트
 

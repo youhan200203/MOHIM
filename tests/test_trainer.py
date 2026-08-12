@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mohim_dali.trainer import apply_acestep_patch
+from mohim.trainer import apply_acestep_patch
 
 
 class TrainerTests(unittest.TestCase):
@@ -18,8 +18,8 @@ class TrainerTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 apply_acestep_patch(directory, Path(directory) / "missing.patch")
 
-    @patch("mohim_dali.trainer._run")
-    @patch("mohim_dali.trainer.subprocess.run")
+    @patch("mohim.trainer._run")
+    @patch("mohim.trainer.subprocess.run")
     def test_patch_is_applied_after_clean_check(self, run_mock, command_mock):
         """A clean unapplied patch is checked and then applied."""
         run_mock.return_value = subprocess.CompletedProcess([], 1)
@@ -33,8 +33,8 @@ class TrainerTests(unittest.TestCase):
         self.assertIn("--check", command_mock.call_args_list[0].args[0])
         self.assertNotIn("--check", command_mock.call_args_list[1].args[0])
 
-    @patch("mohim_dali.trainer._run")
-    @patch("mohim_dali.trainer.subprocess.run")
+    @patch("mohim.trainer._run")
+    @patch("mohim.trainer.subprocess.run")
     def test_already_applied_patch_is_skipped(self, run_mock, command_mock):
         """An already applied patch must remain idempotent."""
         run_mock.return_value = subprocess.CompletedProcess([], 0)
