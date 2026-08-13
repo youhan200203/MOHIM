@@ -121,7 +121,7 @@ def find_repeating_motif(
     config: MotifConfig,
 ) -> tuple[int, int, float] | None:
     """Return the first candidate that passes the configured threshold."""
-    for start, end, similarity in score_repeating_motifs(
+    for start, end, _, _, similarity, _ in score_repeating_motifs(
         stem_wav, sample_rate, downbeats, config
     ):
         if similarity >= config.similarity_threshold:
@@ -134,7 +134,7 @@ def score_repeating_motifs(
     sample_rate: int,
     downbeats: Iterable[float],
     config: MotifConfig,
-) -> list[tuple[int, int, float]]:
+) -> list[tuple[int, int, float, float, float, float]]:
     """Score every four-bar start downbeat inside the search window."""
     import librosa
     from sklearn.metrics.pairwise import cosine_similarity
@@ -149,7 +149,7 @@ def score_repeating_motifs(
     onset = librosa.onset.onset_strength(y=mono, sr=sample_rate, hop_length=hop_length)
     chroma = librosa.feature.chroma_cens(y=mono, sr=sample_rate, hop_length=hop_length)
     rms = librosa.feature.rms(y=mono, hop_length=hop_length)[0]
-    rms_db = librosa.amplitude_to_db(rms + 1e-8, ref=np.max)
+    rms_db = librosa.amplitude_to_db(rms + 1e-8, ref=1.0)
 
     segments: list[tuple[float, float, np.ndarray, np.ndarray, float]] = []
     for start_sec in downbeats_array:
@@ -161,24 +161,38 @@ def score_repeating_motifs(
         onset_segment = _resize_time(onset[None, start_frame:end_frame], 64).ravel()
         chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64).ravel()
         active = rms_db[start_frame:end_frame] > config.silence_db
-        leading_silence = float(np.flatnonzero(active)[0] / len(active)) if np.any(active) else 1.0
-        segments.append((start_sec, end_sec, onset_segment, chroma_segment, leading_silence))
+        active_ratio = float(np.sum(active) / len(active)) if len(active) else 0.0
+        if active_ratio < config.min_presence:
+            continue
+        segments.append((start_sec, end_sec, onset_segment, chroma_segment, active_ratio))
 
-    candidates: list[tuple[int, int, float]] = []
-    for start_sec, end_sec, first_onset, first_chroma, leading_silence in segments:
+    candidates: list[tuple[int, int, float, float, float, float]] = []
+    for start_sec, end_sec, first_onset, first_chroma, active_ratio in segments:
         if start_sec >= config.search_seconds:
             break
-        scores: list[float] = []
+        onset_scores: list[float] = []
+        chroma_scores: list[float] = []
         for other_start, _, other_onset, other_chroma, _ in segments:
             if abs(other_start - start_sec) < motif_length * 0.9:
                 continue
             onset_similarity = cosine_similarity(first_onset[None], other_onset[None])[0, 0]
             chroma_similarity = cosine_similarity(first_chroma[None], other_chroma[None])[0, 0]
-            scores.append(float(0.3 * onset_similarity + 0.7 * chroma_similarity))
-        mean_score = np.mean(scores) if scores else -1.0
-        adjusted = mean_score * (1.0 - leading_silence)
+            onset_scores.append(float(onset_similarity))
+            chroma_scores.append(float(chroma_similarity))
+        if not onset_scores:
+            continue
+        onset_similarity = float(np.mean(onset_scores))
+        chroma_similarity = float(np.mean(chroma_scores))
+        similarity = 0.3 * onset_similarity + 0.7 * chroma_similarity
         candidates.append(
-            (int(start_sec * sample_rate), int(end_sec * sample_rate), float(adjusted))
+            (
+                int(start_sec * sample_rate),
+                int(end_sec * sample_rate),
+                onset_similarity,
+                chroma_similarity,
+                float(similarity),
+                active_ratio,
+            )
         )
     return candidates
 
@@ -274,7 +288,14 @@ class MotifExtractor:
         rows: list[dict[str, float | int | str]] = []
         for name in candidates:
             matches = score_repeating_motifs(stems[name], sample_rate, downbeats, self.config)
-            for candidate_index, (start, end, similarity) in enumerate(matches):
+            for candidate_index, (
+                start,
+                end,
+                onset_similarity,
+                chroma_similarity,
+                similarity,
+                active_ratio,
+            ) in enumerate(matches):
                 candidate_rms = float(stems[name][:, start:end].square().mean().sqrt())
                 total_rms = sum(
                     float(stems[other][:, start:end].square().mean().sqrt())
@@ -287,6 +308,9 @@ class MotifExtractor:
                         "candidate_index": candidate_index,
                         "start_sec": start / sample_rate,
                         "end_sec": end / sample_rate,
+                        "active_ratio": active_ratio,
+                        "onset_similarity": onset_similarity,
+                        "chroma_similarity": chroma_similarity,
                         "similarity": float(similarity),
                         "dominance": float(dominance),
                         "total": float(0.85 * similarity + 0.15 * dominance),

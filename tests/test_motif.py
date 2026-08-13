@@ -1,7 +1,18 @@
+import sys
+import types
 import unittest
 from unittest.mock import patch
 
-from mohim.motif import MotifExtractor, melodic_accompaniment, movement_score, repetition_score
+import numpy as np
+
+from mohim.motif import (
+    MotifConfig,
+    MotifExtractor,
+    melodic_accompaniment,
+    movement_score,
+    repetition_score,
+    score_repeating_motifs,
+)
 
 
 class _FakeStemSlice:
@@ -31,6 +42,28 @@ class _FakeStem:
 
     def __add__(self, other):
         return _FakeStem(self.rms + other.rms)
+
+
+class _FakeArray:
+    def __init__(self, values):
+        self.values = values
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.values
+
+
+class _FakeAudioStem:
+    def __init__(self, values):
+        self.values = values
+
+    def mean(self, _axis):
+        return _FakeArray(self.values)
 
 
 class MotifScoreTests(unittest.TestCase):
@@ -96,7 +129,9 @@ class MotifScoreTests(unittest.TestCase):
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
         score_motifs.side_effect = lambda stem, *_args: (
-            [(100, 500, 0.20), (200, 600, 0.70)] if stem is guitar else [(300, 700, 0.40)]
+            [(100, 500, 0.10, 0.24, 0.20, 0.8), (200, 600, 0.60, 0.74, 0.70, 0.9)]
+            if stem is guitar
+            else [(300, 700, 0.30, 0.44, 0.40, 0.7)]
         )
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
@@ -104,7 +139,60 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertEqual(len(result["candidates"]), 3)
         self.assertEqual([row["similarity"] for row in result["candidates"]], [0.2, 0.7, 0.4])
+        self.assertEqual(
+            [row["onset_similarity"] for row in result["candidates"]], [0.1, 0.6, 0.3]
+        )
+        self.assertEqual([row["active_ratio"] for row in result["candidates"]], [0.8, 0.9, 0.7])
         self.assertAlmostEqual(result["melodic_accompaniment"].rms, 1.0)
+
+    def test_repeating_motifs_filter_by_absolute_active_ratio_and_report_components(self):
+        librosa = types.ModuleType("librosa")
+        librosa.feature = types.SimpleNamespace(
+            rms=lambda **_kwargs: np.array(
+                [[0.001] * 5 + [0.02, 0.0, 0.0, 0.0, 0.0] + [0.02] * 10]
+            ),
+            chroma_cens=lambda **_kwargs: np.ones((12, 20)),
+        )
+        librosa.onset = types.SimpleNamespace(onset_strength=lambda **_kwargs: np.ones(20))
+        librosa.time_to_frames = lambda seconds, **_kwargs: int(seconds * 5)
+
+        def amplitude_to_db(values, ref):
+            self.assertEqual(ref, 1.0)
+            return 20.0 * np.log10(np.maximum(values, 1e-8))
+
+        librosa.amplitude_to_db = amplitude_to_db
+
+        sklearn = types.ModuleType("sklearn")
+        metrics = types.ModuleType("sklearn.metrics")
+        pairwise = types.ModuleType("sklearn.metrics.pairwise")
+        pairwise.cosine_similarity = lambda first, _second: np.array(
+            [[0.2 if first.shape[1] == 64 else 0.8]]
+        )
+        stem = _FakeAudioStem(np.zeros(400))
+
+        with patch.dict(
+            sys.modules,
+            {
+                "librosa": librosa,
+                "sklearn": sklearn,
+                "sklearn.metrics": metrics,
+                "sklearn.metrics.pairwise": pairwise,
+            },
+        ):
+            result = score_repeating_motifs(
+                stem,
+                sample_rate=100,
+                downbeats=[0.0, 1.0, 2.0, 3.0],
+                config=MotifConfig(bars=1),
+            )
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual([row[0] for row in result], [100, 200, 300])
+        self.assertEqual([row[5] for row in result], [0.2, 1.0, 1.0])
+        for _, _, onset_similarity, chroma_similarity, similarity, _ in result:
+            self.assertAlmostEqual(onset_similarity, 0.2)
+            self.assertAlmostEqual(chroma_similarity, 0.8)
+            self.assertAlmostEqual(similarity, 0.62)
 
 
 if __name__ == "__main__":
