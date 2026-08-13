@@ -17,10 +17,9 @@ class MotifConfig:
     candidate_stems: tuple[str, ...] = ("guitar", "piano", "bass", "other")
     bars: int = 4
     search_seconds: float = 30.0
-    similarity_threshold: float = 0.56
+    onset_threshold: float = 0.56
     silence_db: float = -40.0
-    min_presence: float = 0.70
-    min_stem_score: float = 0.25
+    min_presence: float = 0.80
 
 
 def movement_score(midi_notes: Iterable[float], octave_fold: bool = True) -> float:
@@ -99,12 +98,10 @@ def score_motif_candidate(stem_wav: Any, full_wav: Any, sample_rate: int, hop_le
     midi_notes = _extract_midi_notes(stem.astype(np.float32), sample_rate) if presence >= 0.30 else []
     movement = movement_score(midi_notes)
     repetition = repetition_score(midi_notes)
-    total = 0.5 * presence + 0.25 * movement + 0.25 * repetition
     return {
         "presence": presence,
         "movement": movement,
         "repetition": repetition,
-        "total": float(total),
     }
 
 
@@ -119,13 +116,11 @@ def find_repeating_motif(
     sample_rate: int,
     downbeats: Iterable[float],
     config: MotifConfig,
-) -> tuple[int, int, float] | None:
-    """Return the first candidate that passes the configured threshold."""
-    for start, end, _, _, similarity, _ in score_repeating_motifs(
-        stem_wav, sample_rate, downbeats, config
-    ):
-        if similarity >= config.similarity_threshold:
-            return start, end, similarity
+) -> tuple[int, int, float, float, float, float] | None:
+    """Return the first candidate that passes the configured onset threshold."""
+    for match in score_repeating_motifs(stem_wav, sample_rate, downbeats, config):
+        if match[2] >= config.onset_threshold:
+            return match
     return None
 
 
@@ -216,7 +211,7 @@ class MotifExtractor:
         self.config = config or MotifConfig()
 
     def extract(self, audio_path: str | Path, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> dict[str, Any]:
-        """Return the strongest first-passing motif across all candidate stems."""
+        """Return the most similar first onset-passing motif across candidate stems."""
         del full_wav  # Kept in the public API for DatasetBuilder compatibility.
         candidates = [name for name in self.config.candidate_stems if name in stems]
         if not candidates:
@@ -235,35 +230,30 @@ class MotifExtractor:
                     "matched": False,
                     "start_sec": None,
                     "end_sec": None,
+                    "active_ratio": 0.0,
+                    "onset_similarity": 0.0,
+                    "chroma_similarity": 0.0,
                     "similarity": 0.0,
-                    "dominance": 0.0,
-                    "total": 0.0,
                 }
                 continue
-            start, end, similarity = match
-            candidate_rms = float(stems[name][:, start:end].square().mean().sqrt())
-            total_rms = sum(
-                float(stems[other][:, start:end].square().mean().sqrt())
-                for other in candidates
-            )
-            dominance = candidate_rms / max(total_rms, 1e-8)
-            total = 0.85 * similarity + 0.15 * dominance
+            start, end, onset_similarity, chroma_similarity, similarity, active_ratio = match
             scores[name] = {
                 "matched": True,
                 "start_sec": start / sample_rate,
                 "end_sec": end / sample_rate,
+                "active_ratio": active_ratio,
+                "onset_similarity": onset_similarity,
+                "chroma_similarity": chroma_similarity,
                 "similarity": float(similarity),
-                "dominance": float(dominance),
-                "total": float(total),
             }
 
         matched = [name for name in candidates if matches[name] is not None]
         if not matched:
-            raise ValueError("No repeated four-bar motif passed the similarity threshold.")
-        name = max(matched, key=lambda candidate: float(scores[candidate]["total"]))
+            raise ValueError("No repeated four-bar motif passed the onset threshold.")
+        name = max(matched, key=lambda candidate: float(scores[candidate]["similarity"]))
         match = matches[name]
         assert match is not None
-        start, end, similarity = match
+        start, end, _, _, similarity, _ = match
         return {
             "stem_name": name,
             "stem_scores": scores,
@@ -281,7 +271,7 @@ class MotifExtractor:
         stems: dict[str, Any],
         sample_rate: int,
     ) -> dict[str, Any]:
-        """Return every pre-threshold candidate for manual calibration."""
+        """Return the first onset-passing candidate from each configured stem."""
         candidates = [name for name in self.config.candidate_stems if name in stems]
         if not candidates:
             raise ValueError("No configured motif candidate stems were produced by the separator.")
@@ -289,37 +279,29 @@ class MotifExtractor:
         downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
         rows: list[dict[str, float | int | str]] = []
         for name in candidates:
-            matches = score_repeating_motifs(stems[name], sample_rate, downbeats, self.config)
-            for candidate_index, (
-                start,
-                end,
-                onset_similarity,
-                chroma_similarity,
-                similarity,
-                active_ratio,
-            ) in enumerate(matches):
-                candidate_rms = float(stems[name][:, start:end].square().mean().sqrt())
-                total_rms = sum(
-                    float(stems[other][:, start:end].square().mean().sqrt())
-                    for other in candidates
-                )
-                dominance = candidate_rms / max(total_rms, 1e-8)
-                rows.append(
-                    {
-                        "stem_name": name,
-                        "candidate_index": candidate_index,
-                        "start_sec": start / sample_rate,
-                        "end_sec": end / sample_rate,
-                        "active_ratio": active_ratio,
-                        "onset_similarity": onset_similarity,
-                        "chroma_similarity": chroma_similarity,
-                        "similarity": float(similarity),
-                        "dominance": float(dominance),
-                        "total": float(0.85 * similarity + 0.15 * dominance),
-                    }
-                )
+            match = find_repeating_motif(stems[name], sample_rate, downbeats, self.config)
+            if match is None:
+                continue
+            start, end, onset_similarity, chroma_similarity, similarity, active_ratio = match
+            rows.append(
+                {
+                    "stem_name": name,
+                    "start_sec": start / sample_rate,
+                    "end_sec": end / sample_rate,
+                    "active_ratio": active_ratio,
+                    "onset_similarity": onset_similarity,
+                    "chroma_similarity": chroma_similarity,
+                    "similarity": float(similarity),
+                }
+            )
+        earliest_onset = min(rows, key=lambda row: float(row["start_sec"])) if rows else None
+        highest_similarity = max(rows, key=lambda row: float(row["similarity"])) if rows else None
         return {
             "candidates": rows,
+            "selections": {
+                "earliest_onset": earliest_onset,
+                "highest_similarity": highest_similarity,
+            },
             "melodic_accompaniment": melodic_accompaniment(stems, candidates),
             "sample_rate": sample_rate,
         }

@@ -8,6 +8,7 @@ import numpy as np
 from mohim.motif import (
     MotifConfig,
     MotifExtractor,
+    find_repeating_motif,
     melodic_accompaniment,
     movement_score,
     repetition_score,
@@ -96,17 +97,20 @@ class MotifScoreTests(unittest.TestCase):
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
         find_motif.side_effect = lambda stem, *_args: (
-            (100, 500, 0.60) if stem is guitar else (200, 600, 0.62)
+            (100, 500, 0.60, 0.64, 0.628, 0.8)
+            if stem is guitar
+            else (200, 600, 0.62, 0.90, 0.816, 0.9)
         )
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
         result = extractor.extract("song.wav", stems, None, 100)
 
         self.assertEqual(find_motif.call_count, 2)
-        self.assertEqual(result["stem_name"], "guitar")
-        self.assertAlmostEqual(result["stem_scores"]["guitar"]["dominance"], 0.8)
-        self.assertAlmostEqual(result["stem_scores"]["guitar"]["total"], 0.63)
-        self.assertAlmostEqual(result["stem_scores"]["piano"]["total"], 0.557)
+        self.assertEqual(result["stem_name"], "piano")
+        self.assertAlmostEqual(result["stem_scores"]["guitar"]["onset_similarity"], 0.60)
+        self.assertAlmostEqual(result["stem_scores"]["piano"]["similarity"], 0.816)
+        self.assertNotIn("dominance", result["stem_scores"]["guitar"])
+        self.assertNotIn("total", result["stem_scores"]["guitar"])
 
     @patch("mohim.motif.find_repeating_motif")
     def test_extract_records_stems_without_a_passing_motif(self, find_motif):
@@ -114,7 +118,7 @@ class MotifScoreTests(unittest.TestCase):
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
         find_motif.side_effect = lambda stem, *_args: (
-            (100, 500, 0.60) if stem is guitar else None
+            (100, 500, 0.60, 0.64, 0.628, 0.8) if stem is guitar else None
         )
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
@@ -123,33 +127,44 @@ class MotifScoreTests(unittest.TestCase):
         self.assertFalse(result["stem_scores"]["piano"]["matched"])
         self.assertIsNone(result["stem_scores"]["piano"]["start_sec"])
 
-    @patch("mohim.motif.score_repeating_motifs")
-    def test_score_all_keeps_every_candidate_without_thresholding(self, score_motifs):
+    @patch("mohim.motif.find_repeating_motif")
+    def test_score_all_keeps_first_onset_passing_candidate_per_stem(self, find_motif):
         guitar = _FakeStem(0.8)
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
-        score_motifs.side_effect = lambda stem, *_args: (
-            [(100, 500, 0.10, 0.24, 0.20, 0.8), (200, 600, 0.60, 0.74, 0.70, 0.9)]
+        find_motif.side_effect = lambda stem, *_args: (
+            (100, 500, 0.60, 0.64, 0.628, 0.8)
             if stem is guitar
-            else [(300, 700, 0.30, 0.44, 0.40, 0.7)]
+            else (300, 700, 0.58, 0.90, 0.804, 0.9)
         )
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
         result = extractor.score_all("song.wav", stems, 100)
 
-        self.assertEqual(len(result["candidates"]), 3)
-        self.assertEqual([row["similarity"] for row in result["candidates"]], [0.2, 0.7, 0.4])
-        self.assertEqual(
-            [row["onset_similarity"] for row in result["candidates"]], [0.1, 0.6, 0.3]
-        )
-        self.assertEqual([row["active_ratio"] for row in result["candidates"]], [0.8, 0.9, 0.7])
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertEqual(result["selections"]["earliest_onset"]["stem_name"], "guitar")
+        self.assertEqual(result["selections"]["highest_similarity"]["stem_name"], "piano")
+        self.assertNotIn("candidate_index", result["candidates"][0])
+        self.assertNotIn("dominance", result["candidates"][0])
+        self.assertNotIn("total", result["candidates"][0])
         self.assertAlmostEqual(result["melodic_accompaniment"].rms, 1.0)
+
+    @patch("mohim.motif.score_repeating_motifs")
+    def test_find_repeating_motif_uses_only_onset_threshold(self, score_motifs):
+        score_motifs.return_value = [
+            (100, 500, 0.55, 0.90, 0.795, 0.9),
+            (200, 600, 0.56, 0.40, 0.448, 0.8),
+        ]
+
+        result = find_repeating_motif(None, 100, [0, 1, 2], MotifConfig())
+
+        self.assertEqual(result, score_motifs.return_value[1])
 
     def test_repeating_motifs_filter_by_absolute_active_ratio_and_report_components(self):
         librosa = types.ModuleType("librosa")
         librosa.feature = types.SimpleNamespace(
             rms=lambda **_kwargs: np.array(
-                [[0.02] * 6 + [0.001] * 4 + [0.02] * 7 + [0.001] * 3 + [0.02] * 20]
+                [[0.02] * 7 + [0.001] * 3 + [0.02] * 8 + [0.001] * 2 + [0.02] * 20]
             ),
             chroma_cens=lambda **_kwargs: np.ones((12, 40)),
         )
@@ -208,7 +223,7 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertEqual(len(result), 3)
         self.assertEqual([row[0] for row in result], [200, 400, 600])
-        self.assertEqual([row[5] for row in result], [0.7, 1.0, 1.0])
+        self.assertEqual([row[5] for row in result], [0.8, 1.0, 1.0])
         for _, _, onset_similarity, chroma_similarity, similarity, _ in result:
             self.assertAlmostEqual(onset_similarity, 0.6)
             self.assertAlmostEqual(chroma_similarity, 0.8)
