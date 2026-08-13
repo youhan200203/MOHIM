@@ -1,5 +1,5 @@
 diff --git a/acestep/training/data_module.py b/acestep/training/data_module.py
-index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed3d6fc9aa 100644
+index 68e0b23..daed4f6 100644
 --- a/acestep/training/data_module.py
 +++ b/acestep/training/data_module.py
 @@ -45,7 +45,7 @@ class PreprocessedTensorDataset(Dataset):
@@ -35,9 +35,9 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
 +        if self.dual_stream:
 +            required = (
 +                "motif_seed_latents", "motif_seed_attention_mask",
-+                "motif_target_latents", "motif_target_attention_mask",
++                "accompaniment_target_latents", "accompaniment_target_attention_mask",
 +                "vocal_target_latents", "vocal_target_attention_mask",
-+                "motif_encoder_hidden_states", "motif_encoder_attention_mask",
++                "accompaniment_encoder_hidden_states", "accompaniment_encoder_attention_mask",
 +                "vocal_encoder_hidden_states", "vocal_encoder_attention_mask",
 +            )
 +            missing = [key for key in required if key not in data]
@@ -45,8 +45,8 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
 +                raise ValueError(f"Dual-stream tensor {tensor_path} is missing keys: {missing}")
 +            sample.update({key: data[key] for key in required})
 +        return sample
- 
- 
+
+
  def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
 @@ -207,7 +221,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
              eam = torch.cat([eam, pad], dim=0)
@@ -57,7 +57,7 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
          "target_latents": torch.stack(target_latents),  # [B, T, 64]
          "attention_mask": torch.stack(attention_masks),  # [B, T]
          "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
-@@ -215,6 +229,43 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+@@ -215,6 +229,47 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
          "context_latents": torch.stack(context_latents),  # [B, T, 65]
          "metadata": [s["metadata"] for s in batch],
      }
@@ -74,23 +74,27 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
 +
 +
 +def _collate_dual_stream_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-+    """Pad dual-stream motif and vocal tensors to their batch maxima."""
-+    max_seed = max(sample["motif_seed_latents"].shape[0] for sample in batch)
++    """Pad aligned motif, accompaniment, and vocal tensors to batch maxima."""
 +    max_target = max(
-+        max(sample["motif_target_latents"].shape[0], sample["vocal_target_latents"].shape[0])
++        max(
++            sample["accompaniment_target_latents"].shape[0],
++            sample["vocal_target_latents"].shape[0],
++        )
 +        for sample in batch
 +    )
-+    max_motif_condition = max(sample["motif_encoder_hidden_states"].shape[0] for sample in batch)
++    max_accompaniment_condition = max(
++        sample["accompaniment_encoder_hidden_states"].shape[0] for sample in batch
++    )
 +    max_vocal_condition = max(sample["vocal_encoder_hidden_states"].shape[0] for sample in batch)
 +    fields = {
-+        "motif_seed_latents": max_seed,
-+        "motif_seed_attention_mask": max_seed,
-+        "motif_target_latents": max_target,
-+        "motif_target_attention_mask": max_target,
++        "motif_seed_latents": max_target,
++        "motif_seed_attention_mask": max_target,
++        "accompaniment_target_latents": max_target,
++        "accompaniment_target_attention_mask": max_target,
 +        "vocal_target_latents": max_target,
 +        "vocal_target_attention_mask": max_target,
-+        "motif_encoder_hidden_states": max_motif_condition,
-+        "motif_encoder_attention_mask": max_motif_condition,
++        "accompaniment_encoder_hidden_states": max_accompaniment_condition,
++        "accompaniment_encoder_attention_mask": max_accompaniment_condition,
 +        "vocal_encoder_hidden_states": max_vocal_condition,
 +        "vocal_encoder_attention_mask": max_vocal_condition,
 +    }
@@ -98,10 +102,10 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
 +        field: torch.stack([_pad_sequence(sample[field], length) for sample in batch])
 +        for field, length in fields.items()
 +    }
- 
- 
+
+
  class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
-@@ -234,6 +285,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -234,6 +289,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          persistent_workers: bool = True,
          pin_memory_device: str = "",
          val_split: float = 0.0,
@@ -110,7 +114,7 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
      ):
          """Initialize the data module.
          
-@@ -255,6 +308,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -255,6 +312,8 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          self.persistent_workers = persistent_workers
          self.pin_memory_device = pin_memory_device
          self.val_split = val_split
@@ -119,7 +123,7 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
          
          self.train_dataset = None
          self.val_dataset = None
-@@ -263,15 +318,17 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
+@@ -263,15 +322,17 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
          """Setup datasets."""
          if stage == 'fit' or stage is None:
              # Create full dataset
@@ -141,10 +145,10 @@ index 68e0b23d1539346b49a6ed740115004ff5f726df..e3dd4772b4c063ed5be18a495426b3ed
              else:
                  self.train_dataset = full_dataset
 diff --git a/acestep/training_v2/cli/args.py b/acestep/training_v2/cli/args.py
-index 988ff2a87e2311a3c99c765e9c7fb3b841340e07..3a73462330292996c803099b461ad0faaa862717 100644
+index 988ff2a..a53cdbc 100644
 --- a/acestep/training_v2/cli/args.py
 +++ b/acestep/training_v2/cli/args.py
-@@ -259,23 +259,53 @@ def _add_common_training_args(
+@@ -259,24 +259,47 @@ def _add_common_training_args(
          default=_DEFAULT_NUM_WORKERS > 0,
          help="Keep workers alive between epochs (default: True; False on Windows)",
      )
@@ -154,7 +158,7 @@ index 988ff2a87e2311a3c99c765e9c7fb3b841340e07..3a73462330292996c803099b461ad0fa
 +        default=0.2,
 +        help="Fraction of songs reserved for deterministic validation (default: 0.2)",
 +    )
- 
+
      # -- Training hyperparams ------------------------------------------------
      g_train = parser.add_argument_group("Training")
 -    g_train.add_argument("--lr", "--learning-rate", type=float, default=1e-4, dest="learning_rate", help="Initial learning rate (default: 1e-4)")
@@ -176,17 +180,18 @@ index 988ff2a87e2311a3c99c765e9c7fb3b841340e07..3a73462330292996c803099b461ad0fa
 +    g_train.add_argument("--scheduler-type", type=str, default="cosine_restarts", choices=["cosine", "cosine_restarts", "linear", "constant", "constant_with_warmup"], help="LR scheduler (default: cosine_restarts)")
      g_train.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="Recompute activations to save VRAM (~40-60%% less, ~10-30%% slower). On by default; use --no-gradient-checkpointing to disable")
      g_train.add_argument("--offload-encoder", action=argparse.BooleanOptionalAction, default=False, help="Move encoder/VAE to CPU after setup (saves ~2-4GB VRAM)")
+-
 +    g_train.add_argument(
 +        "--dual-stream",
 +        action="store_true",
 +        default=False,
-+        help="Jointly train motif and vocal stem denoising branches",
++        help="Jointly train motif-conditioned accompaniment and vocal branches",
 +    )
 +    g_train.add_argument(
-+        "--motif-loss-weight",
++        "--accompaniment-loss-weight",
 +        type=float,
 +        default=1.0,
-+        help="Dual-stream motif flow-loss weight (default: 1.0)",
++        help="Dual-stream accompaniment flow-loss weight (default: 1.0)",
 +    )
 +    g_train.add_argument(
 +        "--vocal-loss-weight",
@@ -194,26 +199,20 @@ index 988ff2a87e2311a3c99c765e9c7fb3b841340e07..3a73462330292996c803099b461ad0fa
 +        default=1.0,
 +        help="Dual-stream vocal flow-loss weight (default: 1.0)",
 +    )
-+    g_train.add_argument(
-+        "--dual-stream-max-tokens",
-+        type=int,
-+        default=64,
-+        help="Maximum motif/peer condition tokens per stream (default: 64)",
-+    )
- 
      # -- Adapter selection ---------------------------------------------------
      g_adapter = parser.add_argument_group("Adapter")
-@@ -288,7 +318,7 @@ def _add_common_training_args(
+     g_adapter.add_argument("--adapter-type", type=str, default="lora", choices=["lora", "lokr"], help="Adapter type: lora (PEFT) or lokr (LyCORIS) (default: lora)")
+@@ -288,7 +311,7 @@ def _add_common_training_args(
      g_lora.add_argument("--dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
      g_lora.add_argument("--target-modules", nargs="+", default=["q_proj", "k_proj", "v_proj", "o_proj"], help="Modules to apply adapter to")
      g_lora.add_argument("--bias", type=str, default="none", choices=["none", "all", "lora_only"], help="Bias training mode (default: none)")
 -    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both)")
 +    g_lora.add_argument("--attention-type", type=str, default="both", choices=["self", "cross", "both"], help="Attention layers to target (default: both; cross recommended for dual-stream)")
- 
+
      # -- LoKR hyperparams ---------------------------------------------------
      g_lokr = parser.add_argument_group("LoKR (used when --adapter-type=lokr)")
 diff --git a/acestep/training_v2/cli/config_builder.py b/acestep/training_v2/cli/config_builder.py
-index 5c3436ad7ff4e4312f5657dd04c45a413200c2bb..5f9e7bb7255f76fa089050ade957548c0b75b898 100644
+index 5c3436a..bdfdbb8 100644
 --- a/acestep/training_v2/cli/config_builder.py
 +++ b/acestep/training_v2/cli/config_builder.py
 @@ -151,6 +151,7 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
@@ -224,19 +223,18 @@ index 5c3436ad7ff4e4312f5657dd04c45a413200c2bb..5f9e7bb7255f76fa089050ade957548c
          # V2 extensions
          adapter_type=adapter_type,
          optimizer_type=getattr(args, "optimizer_type", "adamw"),
-@@ -186,6 +187,10 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
+@@ -186,6 +187,9 @@ def build_configs(args: argparse.Namespace) -> Tuple[AdapterConfig, TrainingConf
          dataset_json=args.dataset_json,
          tensor_output=args.tensor_output,
          max_duration=args.max_duration,
 +        dual_stream=getattr(args, "dual_stream", False),
-+        motif_loss_weight=getattr(args, "motif_loss_weight", 1.0),
++        accompaniment_loss_weight=getattr(args, "accompaniment_loss_weight", 1.0),
 +        vocal_loss_weight=getattr(args, "vocal_loss_weight", 1.0),
-+        dual_stream_max_tokens=getattr(args, "dual_stream_max_tokens", 64),
      )
- 
+
      return adapter_cfg, train_cfg
 diff --git a/acestep/training_v2/cli/train_fixed.py b/acestep/training_v2/cli/train_fixed.py
-index 252135e5b858a86d498349d186587d82abc1c1ee..7072dda34968229b827846ab7c2ebf75419b5c45 100644
+index 252135e..7072dda 100644
 --- a/acestep/training_v2/cli/train_fixed.py
 +++ b/acestep/training_v2/cli/train_fixed.py
 @@ -177,6 +177,7 @@ def _run_preprocess(args: argparse.Namespace) -> int:
@@ -248,135 +246,186 @@ index 252135e5b858a86d498349d186587d82abc1c1ee..7072dda34968229b827846ab7c2ebf75
      except Exception as exc:
          print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)
 diff --git a/acestep/training_v2/configs.py b/acestep/training_v2/configs.py
-index 1f9680a850b36f4fec7a36ca43b0d2b8da863496..05bc079fa13ce078b1a31e7dc5f6ea3347c28764 100644
+index 1f9680a..d53578c 100644
 --- a/acestep/training_v2/configs.py
 +++ b/acestep/training_v2/configs.py
-@@ -231,6 +231,19 @@ class TrainingConfigV2(TrainingConfig):
+@@ -231,6 +231,16 @@ class TrainingConfigV2(TrainingConfig):
      max_duration: float = 240.0
      """Maximum audio duration in seconds (preprocessing)."""
- 
-+    # --- Dual-stream motif/vocal training ---------------------------------
+
++    # --- Dual-stream accompaniment/vocal training -------------------------
 +    dual_stream: bool = False
-+    """Train motif and vocal stems jointly instead of a single audio target."""
++    """Train accompaniment and vocal stems jointly with a motif condition."""
 +
-+    motif_loss_weight: float = 1.0
-+    """Weight applied to the motif-stream flow matching loss."""
++    accompaniment_loss_weight: float = 1.0
++    """Weight applied to the accompaniment flow matching loss."""
 +
 +    vocal_loss_weight: float = 1.0
 +    """Weight applied to the vocal-stream flow matching loss."""
-+
-+    dual_stream_max_tokens: int = 64
-+    """Maximum motif-seed or peer-stream tokens appended to DiT conditions."""
 +
      # -----------------------------------------------------------------------
      # Helpers
      # -----------------------------------------------------------------------
 diff --git a/acestep/training_v2/dual_stream.py b/acestep/training_v2/dual_stream.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7ab5177b5d2ec2c6f97a8257e4e142a88c5e41bf
+index 0000000..72660f8
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream.py
-@@ -0,0 +1,88 @@
-+"""Dual-stream conditioning helpers for motif and vocal stem training.
-+
-+The helpers keep ACE-Step's DiT unchanged. They turn the motif seed and the
-+other stream's current noisy latent into cross-attention tokens, so both
-+flow-matching branches can be denoised jointly with shared DiT weights.
-+"""
+@@ -0,0 +1,147 @@
++"""Cover-style dual-stream adapter for accompaniment and vocal generation."""
 +
 +from __future__ import annotations
 +
++import weakref
 +from typing import Tuple
 +
 +import torch
 +import torch.nn as nn
-+import torch.nn.functional as F
 +
 +
-+MOTIF_ROLE = 0
++ACCOMPANIMENT_ROLE = 0
 +VOCAL_ROLE = 1
 +
 +
-+def masked_adaptive_pool(
-+    latents: torch.Tensor,
-+    attention_mask: torch.Tensor,
-+    max_tokens: int,
-+) -> Tuple[torch.Tensor, torch.Tensor]:
-+    """Pool variable-length latent sequences without averaging padded frames."""
-+    if latents.ndim != 3 or attention_mask.ndim != 2:
-+        raise ValueError("latents must be [B, T, C] and attention_mask must be [B, T]")
-+    if latents.shape[:2] != attention_mask.shape:
-+        raise ValueError("latent and attention-mask time dimensions must match")
-+    if max_tokens < 1:
-+        raise ValueError("max_tokens must be positive")
-+
-+    token_count = min(max_tokens, latents.shape[1])
-+    mask = attention_mask.to(dtype=latents.dtype).unsqueeze(-1)
-+    values = F.adaptive_avg_pool1d((latents * mask).transpose(1, 2), token_count)
-+    weights = F.adaptive_avg_pool1d(mask.transpose(1, 2), token_count)
-+    pooled = (values / weights.clamp_min(torch.finfo(latents.dtype).eps)).transpose(1, 2)
-+    return pooled, weights.squeeze(1).gt(0)
-+
-+
 +class DualStreamConditioner(nn.Module):
-+    """Build role-aware motif and peer-stream condition tokens for a DiT."""
++    """Add a role token and a zero-initialized temporal motif projection."""
 +
-+    def __init__(self, latent_dim: int, condition_dim: int, max_tokens: int = 64) -> None:
-+        """Initialize projections for motif seed and peer-stream latents."""
++    def __init__(
++        self,
++        latent_dim: int,
++        condition_dim: int,
++        hidden_dim: int,
++        patch_size: int,
++    ) -> None:
 +        super().__init__()
 +        self.latent_dim = latent_dim
 +        self.condition_dim = condition_dim
-+        self.max_tokens = max_tokens
-+        self.seed_projection = nn.Sequential(nn.LayerNorm(latent_dim), nn.Linear(latent_dim, condition_dim))
-+        self.peer_projection = nn.Sequential(nn.LayerNorm(latent_dim), nn.Linear(latent_dim, condition_dim))
++        self.hidden_dim = hidden_dim
++        self.patch_size = patch_size
 +        self.role_embedding = nn.Embedding(2, condition_dim)
-+        self.seed_type_embedding = nn.Parameter(torch.zeros(1, 1, condition_dim))
-+        self.peer_type_embedding = nn.Parameter(torch.zeros(1, 1, condition_dim))
++        self.motif_projection = nn.Conv1d(
++            in_channels=latent_dim,
++            out_channels=hidden_dim,
++            kernel_size=patch_size,
++            stride=patch_size,
++            padding=0,
++        )
++        nn.init.zeros_(self.motif_projection.weight)
++        nn.init.zeros_(self.motif_projection.bias)
 +
 +    def build_condition(
 +        self,
 +        encoder_hidden_states: torch.Tensor,
 +        encoder_attention_mask: torch.Tensor,
-+        motif_seed_latents: torch.Tensor,
-+        motif_seed_attention_mask: torch.Tensor,
-+        peer_latents: torch.Tensor,
-+        peer_attention_mask: torch.Tensor,
 +        role: int,
 +    ) -> Tuple[torch.Tensor, torch.Tensor]:
-+        """Prefix base text conditions with motif-seed and peer-stream tokens."""
-+        if role not in (MOTIF_ROLE, VOCAL_ROLE):
++        """Prefix text/lyric conditions with a role token only."""
++        if role not in (ACCOMPANIMENT_ROLE, VOCAL_ROLE):
 +            raise ValueError(f"unknown dual-stream role: {role}")
-+        seed_tokens, seed_mask = masked_adaptive_pool(
-+            motif_seed_latents, motif_seed_attention_mask, self.max_tokens
-+        )
-+        peer_tokens, peer_mask = masked_adaptive_pool(
-+            peer_latents.detach(), peer_attention_mask, self.max_tokens
-+        )
-+        seed_tokens = self.seed_projection(seed_tokens) + self.seed_type_embedding
-+        peer_tokens = self.peer_projection(peer_tokens) + self.peer_type_embedding
 +        batch_size = encoder_hidden_states.shape[0]
 +        role_ids = torch.full(
 +            (batch_size,), role, device=encoder_hidden_states.device, dtype=torch.long
 +        )
 +        role_token = self.role_embedding(role_ids).unsqueeze(1)
-+        role_mask = torch.ones(batch_size, 1, device=encoder_attention_mask.device, dtype=torch.bool)
-+        condition = torch.cat([role_token, seed_tokens, peer_tokens, encoder_hidden_states], dim=1)
++        role_mask = torch.ones(
++            batch_size, 1, device=encoder_attention_mask.device, dtype=torch.bool
++        )
++        condition = torch.cat([role_token, encoder_hidden_states], dim=1)
 +        mask = torch.cat(
-+            [role_mask, seed_mask, peer_mask, encoder_attention_mask.to(torch.bool)], dim=1
++            [role_mask, encoder_attention_mask.to(torch.bool)], dim=1
 +        )
 +        return condition, mask.to(dtype=encoder_attention_mask.dtype)
++
++    def project_motif(self, motif_latents: torch.Tensor) -> torch.Tensor:
++        """Project a full-resolution motif/silence canvas into DiT hidden space."""
++        if motif_latents.ndim != 3 or motif_latents.shape[-1] != self.latent_dim:
++            raise ValueError(
++                f"motif_latents must be [B, T, {self.latent_dim}], got {tuple(motif_latents.shape)}"
++            )
++        return self.motif_projection(motif_latents.transpose(1, 2)).transpose(1, 2)
++
++
++class DualStreamInputProjection(nn.Module):
++    """Preserve the pretrained 192-channel projection and add motif delta."""
++
++    def __init__(
++        self,
++        base_projection: nn.Module,
++        conditioner: DualStreamConditioner,
++    ) -> None:
++        super().__init__()
++        self.base_projection = base_projection
++        object.__setattr__(self, "_conditioner_ref", weakref.ref(conditioner))
++        for parameter in self.base_projection.parameters():
++            parameter.requires_grad = False
++
++    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        """Consume ``[peer | mask | motif | target]`` while reusing base weights."""
++        conditioner = self._conditioner_ref()
++        if conditioner is None:
++            raise RuntimeError("Dual-stream conditioner was released while projection is active.")
++        latent_dim = conditioner.latent_dim
++        expected_channels = latent_dim * 4
++        if hidden_states.shape[-1] != expected_channels:
++            raise ValueError(
++                f"dual-stream projection expected {expected_channels} channels, "
++                f"got {hidden_states.shape[-1]}"
++            )
++        peer_and_mask = hidden_states[..., : latent_dim * 2]
++        motif = hidden_states[..., latent_dim * 2 : latent_dim * 3]
++        target = hidden_states[..., latent_dim * 3 :]
++        base_input = torch.cat([peer_and_mask, target], dim=-1)
++        return self.base_projection(base_input) + conditioner.project_motif(motif)
++
++
++def attach_dual_stream_conditioner(
++    decoder: nn.Module,
++    *,
++    latent_dim: int,
++    condition_dim: int,
++    hidden_dim: int,
++    patch_size: int,
++) -> DualStreamConditioner:
++    """Attach the adapter and wrap the innermost decoder input projection."""
++    if getattr(decoder, "dual_stream_conditioner", None) is not None:
++        raise RuntimeError("Dual-stream conditioner is already attached.")
++    core = _find_decoder_core(decoder)
++    if isinstance(core.proj_in, DualStreamInputProjection):
++        raise RuntimeError("Dual-stream input projection is already installed.")
++    conditioner = DualStreamConditioner(
++        latent_dim=latent_dim,
++        condition_dim=condition_dim,
++        hidden_dim=hidden_dim,
++        patch_size=patch_size,
++    ).to(device=next(core.parameters()).device, dtype=next(core.parameters()).dtype)
++    decoder.add_module("dual_stream_conditioner", conditioner)
++    core.proj_in = DualStreamInputProjection(core.proj_in, conditioner)
++    return conditioner
++
++
++def _find_decoder_core(decoder: nn.Module) -> nn.Module:
++    """Find the DiT module that owns ``proj_in`` through PEFT wrappers."""
++    stack = [decoder]
++    visited: set[int] = set()
++    while stack:
++        current = stack.pop()
++        if id(current) in visited:
++            continue
++        visited.add(id(current))
++        if hasattr(current, "proj_in"):
++            return current
++        for attr in ("_forward_module", "_orig_mod", "base_model", "model", "module"):
++            child = getattr(current, attr, None)
++            if isinstance(child, nn.Module):
++                stack.append(child)
++    raise RuntimeError("Could not find the decoder module that owns proj_in.")
 diff --git a/acestep/training_v2/dual_stream_inference.py b/acestep/training_v2/dual_stream_inference.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eafa9aee087
+index 0000000..c756b10
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_inference.py
-@@ -0,0 +1,127 @@
-+"""Joint Euler sampler for validating dual-stream motif/vocal adapters.
-+
-+The caller supplies already encoded text conditions and a VAE-encoded motif
-+seed. Keeping audio/text encoding outside this module makes it usable from a
-+small research script without adding a Gradio or HTTP surface.
-+"""
+@@ -0,0 +1,148 @@
++"""Joint Euler sampler for motif-conditioned accompaniment and vocals."""
 +
 +from __future__ import annotations
 +
@@ -385,7 +434,7 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +import torch
 +
 +from acestep.training_v2.dual_stream import (
-+    MOTIF_ROLE,
++    ACCOMPANIMENT_ROLE,
 +    VOCAL_ROLE,
 +    DualStreamConditioner,
 +)
@@ -395,8 +444,8 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +def sample_dual_stream_latents(
 +    decoder: torch.nn.Module,
 +    conditioner: DualStreamConditioner,
-+    motif_encoder_hidden_states: torch.Tensor,
-+    motif_encoder_attention_mask: torch.Tensor,
++    accompaniment_encoder_hidden_states: torch.Tensor,
++    accompaniment_encoder_attention_mask: torch.Tensor,
 +    vocal_encoder_hidden_states: torch.Tensor,
 +    vocal_encoder_attention_mask: torch.Tensor,
 +    motif_seed_latents: torch.Tensor,
@@ -408,59 +457,87 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +    seed: int | None = None,
 +    guidance_scale: float = 7.0,
 +) -> Tuple[torch.Tensor, torch.Tensor]:
-+    """Jointly denoise motif and vocal latent streams with Euler integration.
-+
-+    Returns motif and vocal latents shaped ``[batch, output_frames, latent_dim]``.
-+    The caller can decode each stream with ACE-Step's VAE and optionally mix
-+    them only for listening; no full-mix model target is involved.
-+    """
++    """Denoise accompaniment and vocal trajectories simultaneously."""
 +    if output_frames < 1 or latent_dim < 1 or steps < 1 or guidance_scale < 1.0:
 +        raise ValueError("output dimensions and steps must be positive; guidance_scale must be >= 1")
-+    device = motif_encoder_hidden_states.device
-+    dtype = motif_encoder_hidden_states.dtype
++    if motif_seed_latents.shape[1] != output_frames:
++        raise ValueError(
++            "motif_seed_latents must be a full-length motif/silence canvas "
++            f"({motif_seed_latents.shape[1]} vs {output_frames} frames)"
++        )
++    device = accompaniment_encoder_hidden_states.device
++    dtype = accompaniment_encoder_hidden_states.dtype
 +    generator = None
 +    if seed is not None:
 +        generator = torch.Generator(device=device).manual_seed(seed)
-+    shape = (motif_encoder_hidden_states.shape[0], output_frames, latent_dim)
-+    motif = torch.randn(shape, device=device, dtype=dtype, generator=generator)
++    shape = (
++        accompaniment_encoder_hidden_states.shape[0],
++        output_frames,
++        latent_dim,
++    )
++    accompaniment = torch.randn(shape, device=device, dtype=dtype, generator=generator)
 +    vocal = torch.randn(shape, device=device, dtype=dtype, generator=generator)
-+    stream_mask = torch.ones(shape[:2], device=device, dtype=dtype)
-+    context = torch.zeros(shape[0], shape[1], latent_dim * 2, device=device, dtype=dtype)
++    stream_mask = motif_seed_attention_mask.to(device=device, dtype=dtype)
++    chunk_mask = stream_mask.unsqueeze(-1).expand(-1, -1, latent_dim)
++    motif_condition = motif_seed_latents.to(device=device, dtype=dtype) * stream_mask.unsqueeze(-1)
 +    times = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=dtype)
 +
++    accompaniment_condition, accompaniment_condition_mask = conditioner.build_condition(
++        accompaniment_encoder_hidden_states,
++        accompaniment_encoder_attention_mask,
++        ACCOMPANIMENT_ROLE,
++    )
++    vocal_condition, vocal_condition_mask = conditioner.build_condition(
++        vocal_encoder_hidden_states,
++        vocal_encoder_attention_mask,
++        VOCAL_ROLE,
++    )
++    accompaniment_unconditional, _ = conditioner.build_condition(
++        null_condition_emb.expand_as(accompaniment_encoder_hidden_states),
++        accompaniment_encoder_attention_mask,
++        ACCOMPANIMENT_ROLE,
++    )
++    vocal_unconditional, _ = conditioner.build_condition(
++        null_condition_emb.expand_as(vocal_encoder_hidden_states),
++        vocal_encoder_attention_mask,
++        VOCAL_ROLE,
++    )
++
 +    for index in range(steps):
-+        t = times[index].expand(shape[0])
++        timestep = times[index].expand(shape[0])
 +        dt = times[index + 1] - times[index]
-+        motif_condition, motif_condition_mask = conditioner.build_condition(
-+            motif_encoder_hidden_states,
-+            motif_encoder_attention_mask,
-+            motif_seed_latents,
-+            motif_seed_attention_mask,
-+            vocal,
-+            stream_mask,
-+            MOTIF_ROLE,
++        accompaniment_context = torch.cat(
++            [vocal * stream_mask.unsqueeze(-1), chunk_mask, motif_condition], dim=-1
 +        )
-+        vocal_condition, vocal_condition_mask = conditioner.build_condition(
-+            vocal_encoder_hidden_states,
-+            vocal_encoder_attention_mask,
-+            motif_seed_latents,
-+            motif_seed_attention_mask,
-+            motif,
-+            stream_mask,
-+            VOCAL_ROLE,
++        vocal_context = torch.cat(
++            [accompaniment * stream_mask.unsqueeze(-1), chunk_mask, motif_condition], dim=-1
 +        )
-+        motif_velocity = _guided_velocity(
-+            decoder, motif, stream_mask, motif_condition, motif_condition_mask,
-+            context, t, null_condition_emb, guidance_scale,
++        accompaniment_velocity = _guided_velocity(
++            decoder,
++            accompaniment,
++            stream_mask,
++            accompaniment_condition,
++            accompaniment_unconditional,
++            accompaniment_condition_mask,
++            accompaniment_context,
++            timestep,
++            guidance_scale,
 +        )
 +        vocal_velocity = _guided_velocity(
-+            decoder, vocal, stream_mask, vocal_condition, vocal_condition_mask,
-+            context, t, null_condition_emb, guidance_scale,
++            decoder,
++            vocal,
++            stream_mask,
++            vocal_condition,
++            vocal_unconditional,
++            vocal_condition_mask,
++            vocal_context,
++            timestep,
++            guidance_scale,
 +        )
-+        motif = motif + dt * motif_velocity
++        accompaniment = accompaniment + dt * accompaniment_velocity
 +        vocal = vocal + dt * vocal_velocity
 +
-+    return motif, vocal
++    return accompaniment, vocal
 +
 +
 +def _guided_velocity(
@@ -468,13 +545,13 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +    latents: torch.Tensor,
 +    attention_mask: torch.Tensor,
 +    condition: torch.Tensor,
++    unconditional_condition: torch.Tensor,
 +    condition_mask: torch.Tensor,
 +    context: torch.Tensor,
 +    timestep: torch.Tensor,
-+    null_condition_emb: torch.Tensor,
 +    guidance_scale: float,
 +) -> torch.Tensor:
-+    """Apply ACE-Step classifier-free guidance to one stream velocity."""
++    """Apply CFG while retaining role, peer, mask, and motif inputs."""
 +    if guidance_scale == 1.0:
 +        return decoder(
 +            hidden_states=latents,
@@ -490,9 +567,7 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +        timestep=torch.cat([timestep, timestep], dim=0),
 +        timestep_r=torch.cat([timestep, timestep], dim=0),
 +        attention_mask=torch.cat([attention_mask, attention_mask], dim=0),
-+        encoder_hidden_states=torch.cat(
-+            [condition, null_condition_emb.expand_as(condition)], dim=0
-+        ),
++        encoder_hidden_states=torch.cat([condition, unconditional_condition], dim=0),
 +        encoder_attention_mask=torch.cat([condition_mask, condition_mask], dim=0),
 +        context_latents=torch.cat([context, context], dim=0),
 +    )[0]
@@ -500,11 +575,11 @@ index 0000000000000000000000000000000000000000..22478e7a2e35b7552e7872fe5c3a3eaf
 +    return unconditional + guidance_scale * (conditional - unconditional)
 diff --git a/acestep/training_v2/dual_stream_preprocess.py b/acestep/training_v2/dual_stream_preprocess.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..d03a550482544dd3418df8e40127bc4c8043240a
+index 0000000..99b7c47
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_preprocess.py
-@@ -0,0 +1,34 @@
-+"""Audio-stem encoding helpers used by dual-stream preprocessing."""
+@@ -0,0 +1,59 @@
++"""Audio encoding helpers used by dual-stream preprocessing."""
 +
 +from __future__ import annotations
 +
@@ -519,7 +594,7 @@ index 0000000000000000000000000000000000000000..d03a550482544dd3418df8e40127bc4c
 +
 +DUAL_STREAM_AUDIO_FIELDS = (
 +    "motif_seed_audio",
-+    "motif_target_audio",
++    "accompaniment_target_audio",
 +    "vocal_target_audio",
 +)
 +
@@ -530,80 +605,120 @@ index 0000000000000000000000000000000000000000..d03a550482544dd3418df8e40127bc4c
 +    dtype: torch.dtype,
 +    max_duration: float,
 +) -> torch.Tensor:
-+    """Load one aligned stem and return its VAE latent sequence on CPU."""
++    """Load one aligned full-length stem and return VAE latents on CPU."""
 +    audio_path = Path(path)
 +    if not audio_path.is_file():
 +        raise FileNotFoundError(f"Dual-stream stem not found: {audio_path}")
 +    audio, _ = load_audio_stereo(str(audio_path), TARGET_SR, max_duration)
++    return _encode_audio(audio, vae, dtype)
++
++
++def encode_motif_condition_latents(
++    path: str,
++    vae: Any,
++    dtype: torch.dtype,
++    target_samples: int,
++) -> torch.Tensor:
++    """Encode ``[motif waveform | silence]`` once at the target duration."""
++    audio_path = Path(path)
++    if not audio_path.is_file():
++        raise FileNotFoundError(f"Dual-stream motif not found: {audio_path}")
++    if target_samples < 1:
++        raise ValueError("target_samples must be positive")
++    motif, _ = load_audio_stereo(
++        str(audio_path), TARGET_SR, target_samples / TARGET_SR
++    )
++    canvas = motif.new_zeros(motif.shape[0], target_samples)
++    copy_samples = min(motif.shape[-1], target_samples)
++    canvas[:, :copy_samples] = motif[:, :copy_samples]
++    return _encode_audio(canvas, vae, dtype)
++
++
++def _encode_audio(audio: torch.Tensor, vae: Any, dtype: torch.dtype) -> torch.Tensor:
 +    audio = audio.unsqueeze(0).to(device=next(vae.parameters()).device, dtype=vae.dtype)
 +    with torch.no_grad():
 +        return tiled_vae_encode(vae, audio, dtype).squeeze(0).cpu()
 diff --git a/acestep/training_v2/dual_stream_test.py b/acestep/training_v2/dual_stream_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..007a0c4c17926c65e5527afccb04dafe650ffca0
+index 0000000..f35a86e
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_test.py
-@@ -0,0 +1,70 @@
-+"""Unit tests for dual-stream condition construction."""
+@@ -0,0 +1,85 @@
++"""Unit tests for the cover-style dual-stream adapter."""
 +
-+import unittest
 +import tempfile
++import unittest
 +from pathlib import Path
 +
 +import torch
++import torch.nn as nn
 +
 +from acestep.training.data_module import PreprocessedDataModule
 +from acestep.training_v2.dual_stream import (
-+    MOTIF_ROLE,
++    ACCOMPANIMENT_ROLE,
 +    VOCAL_ROLE,
 +    DualStreamConditioner,
-+    masked_adaptive_pool,
++    DualStreamInputProjection,
 +)
 +
 +
 +class DualStreamConditionerTests(unittest.TestCase):
-+    """Validate shape and masking behavior without loading ACE-Step weights."""
++    def _modules(self):
++        base = nn.Linear(6, 4, bias=False)
++        conditioner = DualStreamConditioner(
++            latent_dim=2,
++            condition_dim=4,
++            hidden_dim=4,
++            patch_size=1,
++        )
++        projection = DualStreamInputProjection(base, conditioner)
++        return base, conditioner, projection
 +
-+    def test_masked_pool_ignores_padded_values(self):
-+        """Padding must not change pooled values."""
-+        latents = torch.tensor([[[2.0], [4.0], [100.0], [100.0]]])
-+        mask = torch.tensor([[1, 1, 0, 0]])
-+        pooled, pooled_mask = masked_adaptive_pool(latents, mask, max_tokens=1)
-+        self.assertTrue(pooled_mask.item())
-+        self.assertTrue(torch.allclose(pooled, torch.tensor([[[3.0]]])))
++    def test_zero_init_exactly_preserves_pretrained_projection(self):
++        base, _, projection = self._modules()
++        combined = torch.randn(2, 5, 8)
++        expected_base_input = torch.cat([combined[..., :4], combined[..., 6:]], dim=-1)
++        self.assertTrue(torch.equal(projection(combined), base(expected_base_input)))
 +
-+    def test_build_condition_prefixes_role_seed_peer_and_text(self):
-+        """Both streams receive distinct role tokens and a combined mask."""
-+        conditioner = DualStreamConditioner(latent_dim=2, condition_dim=4, max_tokens=2)
++    def test_motif_projection_receives_gradients_and_leaves_zero(self):
++        _, conditioner, projection = self._modules()
++        optimizer = torch.optim.SGD(conditioner.parameters(), lr=0.1)
++        combined = torch.randn(2, 5, 8)
++        projection(combined).sum().backward()
++        self.assertIsNotNone(conditioner.motif_projection.weight.grad)
++        optimizer.step()
++        self.assertGreater(float(conditioner.motif_projection.weight.abs().sum()), 0.0)
++
++    def test_condition_contains_role_and_text_only(self):
++        _, conditioner, _ = self._modules()
 +        base = torch.zeros(1, 3, 4)
 +        base_mask = torch.ones(1, 3)
-+        seed = torch.ones(1, 4, 2)
-+        seed_mask = torch.tensor([[1, 1, 1, 0]])
-+        peer = torch.ones(1, 5, 2)
-+        peer_mask = torch.ones(1, 5)
++        accompaniment, accompaniment_mask = conditioner.build_condition(
++            base, base_mask, ACCOMPANIMENT_ROLE
++        )
++        vocal, vocal_mask = conditioner.build_condition(base, base_mask, VOCAL_ROLE)
++        self.assertEqual(accompaniment.shape, (1, 4, 4))
++        self.assertTrue(torch.equal(accompaniment_mask, vocal_mask))
++        self.assertFalse(torch.equal(accompaniment[:, :1], vocal[:, :1]))
++        self.assertTrue(torch.equal(accompaniment[:, 1:], base))
 +
-+        motif, motif_mask = conditioner.build_condition(
-+            base, base_mask, seed, seed_mask, peer, peer_mask, MOTIF_ROLE
-+        )
-+        vocal, vocal_mask = conditioner.build_condition(
-+            base, base_mask, seed, seed_mask, peer, peer_mask, VOCAL_ROLE
-+        )
-+        self.assertEqual(motif.shape, (1, 8, 4))
-+        self.assertTrue(torch.equal(motif_mask, vocal_mask))
-+        self.assertFalse(torch.equal(motif[:, :1], vocal[:, :1]))
++    def test_state_round_trip_includes_role_and_motif_projection(self):
++        _, first, _ = self._modules()
++        with torch.no_grad():
++            first.role_embedding.weight.fill_(0.25)
++            first.motif_projection.weight.fill_(0.5)
++        second = DualStreamConditioner(2, 4, 4, 1)
++        second.load_state_dict(first.state_dict())
++        for key, value in first.state_dict().items():
++            self.assertTrue(torch.equal(value, second.state_dict()[key]))
 +
 +    def test_train_validation_split_is_reproducible(self):
-+        """The same seed must preserve the 80/20 song assignment across resumes."""
 +        with tempfile.TemporaryDirectory(dir=".") as temp_dir:
 +            root = Path(temp_dir)
 +            for index in range(10):
 +                (root / f"song_{index}.pt").touch()
-+            first = PreprocessedDataModule(
-+                str(root), val_split=0.2, split_seed=42
-+            )
-+            second = PreprocessedDataModule(
-+                str(root), val_split=0.2, split_seed=42
-+            )
++            first = PreprocessedDataModule(str(root), val_split=0.2, split_seed=42)
++            second = PreprocessedDataModule(str(root), val_split=0.2, split_seed=42)
 +            first.setup("fit")
 +            second.setup("fit")
 +            self.assertEqual(len(first.train_dataset), 8)
@@ -616,11 +731,11 @@ index 0000000000000000000000000000000000000000..007a0c4c17926c65e5527afccb04dafe
 +    unittest.main()
 diff --git a/acestep/training_v2/dual_stream_training.py b/acestep/training_v2/dual_stream_training.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc922b5bff
+index 0000000..bebb63e
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_training.py
-@@ -0,0 +1,111 @@
-+"""Per-step joint flow matching for dual-stream motif/vocal training."""
+@@ -0,0 +1,189 @@
++"""Per-step joint flow matching for accompaniment/vocal training."""
 +
 +from __future__ import annotations
 +
@@ -629,7 +744,7 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +
 +import torch
 +
-+from acestep.training_v2.dual_stream import MOTIF_ROLE, VOCAL_ROLE
++from acestep.training_v2.dual_stream import ACCOMPANIMENT_ROLE, VOCAL_ROLE
 +from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
 +
 +
@@ -640,7 +755,7 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +    record_loss: bool = True,
 +    apply_condition_dropout: bool = True,
 +) -> torch.Tensor:
-+    """Compute weighted flow loss for mutually conditioned motif and vocal streams."""
++    """Compute joint flow loss at one shared timestep for both targets."""
 +    if module.device_type in ("cuda", "xpu", "mps") and module.dtype != torch.float32:
 +        autocast_ctx = torch.autocast(device_type=module.device_type, dtype=module.dtype)
 +    else:
@@ -648,19 +763,39 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +
 +    with autocast_ctx:
 +        nb = module.transfer_non_blocking
-+        motif_target = batch["motif_target_latents"].to(module.device, module.dtype, non_blocking=nb)
-+        motif_mask = batch["motif_target_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
-+        vocal_target = batch["vocal_target_latents"].to(module.device, module.dtype, non_blocking=nb)
-+        vocal_mask = batch["vocal_target_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
-+        motif_seed = batch["motif_seed_latents"].to(module.device, module.dtype, non_blocking=nb)
-+        motif_seed_mask = batch["motif_seed_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
-+        motif_base_condition = batch["motif_encoder_hidden_states"].to(module.device, module.dtype, non_blocking=nb)
-+        motif_base_condition_mask = batch["motif_encoder_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
-+        vocal_base_condition = batch["vocal_encoder_hidden_states"].to(module.device, module.dtype, non_blocking=nb)
-+        vocal_base_condition_mask = batch["vocal_encoder_attention_mask"].to(module.device, module.dtype, non_blocking=nb)
++        accompaniment_target = batch["accompaniment_target_latents"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        accompaniment_mask = batch["accompaniment_target_attention_mask"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        vocal_target = batch["vocal_target_latents"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        vocal_mask = batch["vocal_target_attention_mask"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        motif_condition = batch["motif_seed_latents"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        motif_mask = batch["motif_seed_attention_mask"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        accompaniment_base_condition = batch["accompaniment_encoder_hidden_states"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        accompaniment_base_mask = batch["accompaniment_encoder_attention_mask"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        vocal_base_condition = batch["vocal_encoder_hidden_states"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
++        vocal_base_mask = batch["vocal_encoder_attention_mask"].to(
++            module.device, module.dtype, non_blocking=nb
++        )
 +
 +        t, _ = sample_timesteps(
-+            batch_size=motif_target.shape[0],
++            batch_size=accompaniment_target.shape[0],
 +            device=module.device,
 +            dtype=module.dtype,
 +            data_proportion=module._data_proportion,
@@ -669,30 +804,66 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +            use_meanflow=False,
 +        )
 +        t_ = t.unsqueeze(-1).unsqueeze(-1)
-+        motif_noise, vocal_noise = torch.randn_like(motif_target), torch.randn_like(vocal_target)
-+        motif_xt = t_ * motif_noise + (1.0 - t_) * motif_target
++        accompaniment_noise = torch.randn_like(accompaniment_target)
++        vocal_noise = torch.randn_like(vocal_target)
++        accompaniment_xt = t_ * accompaniment_noise + (1.0 - t_) * accompaniment_target
 +        vocal_xt = t_ * vocal_noise + (1.0 - t_) * vocal_target
 +        if module.force_input_grads_for_checkpointing:
-+            motif_xt, vocal_xt = motif_xt.requires_grad_(True), vocal_xt.requires_grad_(True)
++            accompaniment_xt = accompaniment_xt.requires_grad_(True)
++            vocal_xt = vocal_xt.requires_grad_(True)
 +
 +        conditioner = _get_conditioner(module)
-+        motif_condition, motif_condition_mask = conditioner.build_condition(
-+            motif_base_condition, motif_base_condition_mask, motif_seed, motif_seed_mask,
-+            vocal_xt, vocal_mask, MOTIF_ROLE,
++        if apply_condition_dropout and module._null_cond_emb is not None and module._cfg_ratio > 0.0:
++            accompaniment_base_condition = apply_cfg_dropout(
++                accompaniment_base_condition, module._null_cond_emb, module._cfg_ratio
++            )
++            vocal_base_condition = apply_cfg_dropout(
++                vocal_base_condition, module._null_cond_emb, module._cfg_ratio
++            )
++        accompaniment_condition, accompaniment_condition_mask = conditioner.build_condition(
++            accompaniment_base_condition,
++            accompaniment_base_mask,
++            ACCOMPANIMENT_ROLE,
 +        )
 +        vocal_condition, vocal_condition_mask = conditioner.build_condition(
-+            vocal_base_condition, vocal_base_condition_mask, motif_seed, motif_seed_mask,
-+            motif_xt, motif_mask, VOCAL_ROLE,
++            vocal_base_condition,
++            vocal_base_mask,
++            VOCAL_ROLE,
 +        )
-+        if apply_condition_dropout and module._null_cond_emb is not None and module._cfg_ratio > 0.0:
-+            motif_condition = apply_cfg_dropout(motif_condition, module._null_cond_emb, module._cfg_ratio)
-+            vocal_condition = apply_cfg_dropout(vocal_condition, module._null_cond_emb, module._cfg_ratio)
 +
-+        motif_pred = _decode(module, motif_xt, motif_mask, motif_condition, motif_condition_mask, t)
-+        vocal_pred = _decode(module, vocal_xt, vocal_mask, vocal_condition, vocal_condition_mask, t)
++        accompaniment_pred = _decode(
++            module,
++            target_latents=accompaniment_xt,
++            target_mask=accompaniment_mask,
++            peer_latents=vocal_xt.detach(),
++            peer_mask=vocal_mask,
++            motif_condition=motif_condition,
++            motif_mask=motif_mask,
++            condition=accompaniment_condition,
++            condition_mask=accompaniment_condition_mask,
++            timestep=t,
++        )
++        vocal_pred = _decode(
++            module,
++            target_latents=vocal_xt,
++            target_mask=vocal_mask,
++            peer_latents=accompaniment_xt.detach(),
++            peer_mask=accompaniment_mask,
++            motif_condition=motif_condition,
++            motif_mask=motif_mask,
++            condition=vocal_condition,
++            condition_mask=vocal_condition_mask,
++            timestep=t,
++        )
 +        loss = (
-+            module.training_config.motif_loss_weight * _masked_flow_loss(motif_pred, motif_noise - motif_target, motif_mask)
-+            + module.training_config.vocal_loss_weight * _masked_flow_loss(vocal_pred, vocal_noise - vocal_target, vocal_mask)
++            module.training_config.accompaniment_loss_weight
++            * _masked_flow_loss(
++                accompaniment_pred,
++                accompaniment_noise - accompaniment_target,
++                accompaniment_mask,
++            )
++            + module.training_config.vocal_loss_weight
++            * _masked_flow_loss(vocal_pred, vocal_noise - vocal_target, vocal_mask)
 +        )
 +
 +    loss = loss.float()
@@ -701,20 +872,42 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +    return loss
 +
 +
-+def _decode(module: Any, latents: torch.Tensor, mask: torch.Tensor, condition: torch.Tensor, condition_mask: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-+    """Run one stream through the shared DiT with text2music-style zero context."""
-+    context = torch.zeros(
-+        latents.shape[0], latents.shape[1], latents.shape[2] * 2,
-+        device=module.device, dtype=module.dtype,
-+    )
++def _decode(
++    module: Any,
++    *,
++    target_latents: torch.Tensor,
++    target_mask: torch.Tensor,
++    peer_latents: torch.Tensor,
++    peer_mask: torch.Tensor,
++    motif_condition: torch.Tensor,
++    motif_mask: torch.Tensor,
++    condition: torch.Tensor,
++    condition_mask: torch.Tensor,
++    timestep: torch.Tensor,
++) -> torch.Tensor:
++    """Run ``[peer | mask | target]`` plus the temporal motif condition."""
++    latent_dim = target_latents.shape[-1]
++    shared_mask = target_mask * peer_mask * motif_mask
++    masked_peer = peer_latents * shared_mask.unsqueeze(-1)
++    masked_motif = motif_condition * shared_mask.unsqueeze(-1)
++    chunk_mask = shared_mask.unsqueeze(-1).expand(-1, -1, latent_dim)
++    context = torch.cat([masked_peer, chunk_mask, masked_motif], dim=-1)
 +    return module.model.decoder(
-+        hidden_states=latents, timestep=t, timestep_r=t, attention_mask=mask,
-+        encoder_hidden_states=condition, encoder_attention_mask=condition_mask,
++        hidden_states=target_latents,
++        timestep=timestep,
++        timestep_r=timestep,
++        attention_mask=shared_mask,
++        encoder_hidden_states=condition,
++        encoder_attention_mask=condition_mask,
 +        context_latents=context,
 +    )[0]
 +
 +
-+def _masked_flow_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
++def _masked_flow_loss(
++    prediction: torch.Tensor,
++    target: torch.Tensor,
++    mask: torch.Tensor,
++) -> torch.Tensor:
 +    """Return MSE over valid audio frames, excluding collate padding."""
 +    weights = mask.unsqueeze(-1).to(dtype=prediction.dtype)
 +    return ((prediction - target).square() * weights).sum() / (
@@ -732,24 +925,24 @@ index 0000000000000000000000000000000000000000..81a56517c41a7034ee419673e57f4fbc
 +        raise RuntimeError("Dual-stream conditioner is not attached to the decoder.")
 +    return conditioner
 diff --git a/acestep/training_v2/fixed_lora_module.py b/acestep/training_v2/fixed_lora_module.py
-index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a79406c56 100644
+index cad0c65..1734996 100644
 --- a/acestep/training_v2/fixed_lora_module.py
 +++ b/acestep/training_v2/fixed_lora_module.py
 @@ -29,6 +29,10 @@ from acestep.training.lokr_utils import (
- 
+
  # V2 modules
  from acestep.training_v2.configs import LoRAConfigV2, LoKRConfigV2, TrainingConfigV2
 +from acestep.training_v2.dual_stream import (
-+    DualStreamConditioner,
++    attach_dual_stream_conditioner,
 +)
 +from acestep.training_v2.dual_stream_training import run_dual_stream_training_step
  from acestep.training_v2.timestep_sampling import apply_cfg_dropout, sample_timesteps
  from acestep.training_v2.ui import TrainingUpdate
- 
+
 @@ -179,6 +183,12 @@ class FixedLoRAModule(nn.Module):
          else:
              self._inject_lora(model, adapter_config)  # type: ignore[arg-type]
- 
+
 +        self.dual_stream_enabled = training_config.dual_stream
 +        if self.dual_stream_enabled:
 +            if self.adapter_type != "lora":
@@ -758,24 +951,25 @@ index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a
 +
          # Backward-compat alias
          self.lora_info = self.adapter_info
- 
-@@ -265,11 +275,37 @@ class FixedLoRAModule(nn.Module):
+
+@@ -265,11 +275,38 @@ class FixedLoRAModule(nn.Module):
              self.device,
          )
- 
+
 +    def _attach_dual_stream_conditioner(self) -> None:
-+        """Attach trainable motif/peer condition projections to the PEFT decoder."""
++        """Attach role conditioning and a zero-init temporal motif projection."""
 +        model_config = self.model.config
 +        latent_dim = int(getattr(model_config, "audio_acoustic_hidden_dim", 64))
 +        condition_dim = int(
 +            getattr(model_config, "encoder_hidden_size", None) or model_config.hidden_size
 +        )
-+        conditioner = DualStreamConditioner(
++        conditioner = attach_dual_stream_conditioner(
++            self.model.decoder,
 +            latent_dim=latent_dim,
 +            condition_dim=condition_dim,
-+            max_tokens=self.training_config.dual_stream_max_tokens,
-+        ).to(device=self.device, dtype=self.dtype)
-+        self.model.decoder.add_module("dual_stream_conditioner", conditioner)
++            hidden_dim=int(model_config.hidden_size),
++            patch_size=int(model_config.patch_size),
++        )
 +        for parameter in conditioner.parameters():
 +            parameter.requires_grad = True
 +        logger.info(
@@ -786,7 +980,7 @@ index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a
      # -----------------------------------------------------------------------
      # Training step
      # -----------------------------------------------------------------------
- 
+
 -    def training_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
 +    def training_step(
 +        self,
@@ -796,9 +990,9 @@ index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a
 +        apply_condition_dropout: bool = True,
 +    ) -> torch.Tensor:
          """Single training step with corrected timestep sampling + CFG dropout.
- 
+
          Args:
-@@ -280,6 +316,14 @@ class FixedLoRAModule(nn.Module):
+@@ -280,6 +317,14 @@ class FixedLoRAModule(nn.Module):
          Returns:
              Scalar loss tensor (``float32`` for stable backward).
          """
@@ -813,17 +1007,17 @@ index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a
          # Mixed-precision context
          if self.device_type in ("cuda", "xpu", "mps") and self.dtype != torch.float32:
              autocast_ctx = torch.autocast(
-@@ -310,7 +354,7 @@ class FixedLoRAModule(nn.Module):
+@@ -310,7 +355,7 @@ class FixedLoRAModule(nn.Module):
              bsz = target_latents.shape[0]
- 
+
              # ---- CFG dropout (CORRECTED -- missing in original trainer) ----
 -            if self._null_cond_emb is not None and self._cfg_ratio > 0.0:
 +            if apply_condition_dropout and self._null_cond_emb is not None and self._cfg_ratio > 0.0:
                  encoder_hidden_states = apply_cfg_dropout(
                      encoder_hidden_states,
                      self._null_cond_emb,
-@@ -355,5 +399,6 @@ class FixedLoRAModule(nn.Module):
- 
+@@ -355,5 +400,6 @@ class FixedLoRAModule(nn.Module):
+
          # fp32 for stable backward
          diffusion_loss = diffusion_loss.float()
 -        self.training_losses.append(diffusion_loss.item())
@@ -831,12 +1025,12 @@ index cad0c657f7b993e0c433624a7089a7fbc49ed5ff..7ccc50c7bf1a9251660e2e42dc47c76a
 +            self.training_losses.append(diffusion_loss.item())
          return diffusion_loss
 diff --git a/acestep/training_v2/optim.py b/acestep/training_v2/optim.py
-index 38e515dbe2ce7632867df8ee4b26163d1ac0e953..e935eb97f2856af445e7bcbba5aa5308ffb39f4b 100644
+index 38e515d..e935eb9 100644
 --- a/acestep/training_v2/optim.py
 +++ b/acestep/training_v2/optim.py
 @@ -54,16 +54,20 @@ def build_optimizer(
      optimizer_type = optimizer_type.lower().strip()
- 
+
      if optimizer_type == "adamw8bit":
 -        try:
 -            from bitsandbytes.optim import AdamW8bit
@@ -861,7 +1055,7 @@ index 38e515dbe2ce7632867df8ee4b26163d1ac0e953..e935eb97f2856af445e7bcbba5aa5308
 +                    "Install with: pip install bitsandbytes>=0.45.0"
 +                )
 +                optimizer_type = "adamw"
- 
+
      if optimizer_type == "adafactor":
          try:
 @@ -119,13 +123,14 @@ def build_scheduler(
@@ -872,22 +1066,22 @@ index 38e515dbe2ce7632867df8ee4b26163d1ac0e953..e935eb97f2856af445e7bcbba5aa5308
 +    n_restarts: int = 1,
  ):
      """Create a learning rate scheduler from a string key.
- 
+
      Args:
          n_restarts: Number of cosine restart cycles for the
              ``cosine_restarts`` scheduler.  Ignored by other types.
 +            The default of one matches ACE-Step's official UI scheduler.
- 
+
      When the optimizer is Prodigy, defaults to constant schedule
      (Prodigy manages LR internally).
 diff --git a/acestep/training_v2/preprocess.py b/acestep/training_v2/preprocess.py
-index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61e1ac8129 100644
+index 8cc3bcc..e610e7a 100644
 --- a/acestep/training_v2/preprocess.py
 +++ b/acestep/training_v2/preprocess.py
 @@ -39,6 +39,42 @@ from acestep.training_v2.preprocess_vae import (
  logger = logging.getLogger(__name__)
- 
- 
+
+
 +def _sample_tensor_stem(audio_file: Path) -> str:
 +    """Return a readable tensor filename stem using the song directory name."""
 +    return f"{audio_file.parent.name}_{audio_file.stem}"
@@ -939,14 +1133,14 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
              audio paths.
          device: Target device (``"auto"`` to auto-detect).
          precision: Target precision (``"auto"`` to auto-detect).
-+        dual_stream: Also encode motif seed, motif target, and vocal target
-+            stems declared in the dataset JSON.
++        dual_stream: Also encode the full-length motif condition,
++            accompaniment target, and vocal target declared in the dataset JSON.
          progress_callback: ``(current, total, message) -> None``.
          cancel_check: ``() -> bool`` -- return True to cancel.
- 
+
 @@ -96,7 +135,7 @@ def preprocess_audio_files(
      out_path.mkdir(parents=True, exist_ok=True)
- 
+
      # -- Discover audio files -----------------------------------------------
 -    audio_files = _discover_audio_files(audio_dir, dataset_json)
 +    audio_files = _discover_audio_files(audio_dir, dataset_json, dual_stream=dual_stream)
@@ -959,7 +1153,7 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
          cancel_check=cancel_check,
 +        dual_stream=dual_stream,
      )
- 
+
      # -- Pass 2: DIT Encoder ------------------------------------------------
 @@ -175,6 +215,7 @@ def _pass1_light(
      max_duration: float,
@@ -968,21 +1162,22 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +    dual_stream: bool,
  ) -> tuple[List[Path], int]:
      """Load audio, VAE-encode, text-encode, save intermediates.
- 
-@@ -196,6 +237,10 @@ def _pass1_light(
+
+@@ -196,6 +237,11 @@ def _pass1_light(
      )
      from acestep.training.dataset_builder_modules.preprocess_text import encode_text
      from acestep.training.dataset_builder_modules.preprocess_lyrics import encode_lyrics
 +    from acestep.training_v2.dual_stream_preprocess import (
 +        DUAL_STREAM_AUDIO_FIELDS,
++        encode_motif_condition_latents,
 +        encode_stem_latents,
 +    )
- 
+
      dtype = _resolve_dtype(precision)
- 
-@@ -234,7 +279,8 @@ def _pass1_light(
+
+@@ -234,7 +280,8 @@ def _pass1_light(
                  progress_callback(i, total, f"[Pass 1] {af.name}")
- 
+
              # Skip if final .pt already exists (resumable)
 -            final_pt = out_path / f"{af.stem}.pt"
 +            sample_stem = _sample_tensor_stem(af)
@@ -990,10 +1185,18 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
              if final_pt.exists():
                  logger.info("[Side-Step] Skipping (final exists): %s", af.name)
                  continue
-@@ -251,13 +297,36 @@ def _pass1_light(
+@@ -242,6 +289,7 @@ def _pass1_light(
+             try:
+                 # 1. Load audio (stereo, 48 kHz)
+                 audio, _sr = load_audio_stereo(str(af), _TARGET_SR, max_duration)
++                target_sample_count = audio.shape[-1]
+                 audio = audio.unsqueeze(0).to(device=device, dtype=vae.dtype)
+
+                 # 2. VAE encode (tiled for long audio)
+@@ -251,13 +299,45 @@ def _pass1_light(
                  # Free raw audio immediately -- no longer needed after VAE encode
                  del audio
- 
+
 +                sm = sample_meta.get(str(af.resolve()), sample_meta.get(af.name, {}))
 +
 +                dual_stream_tensors: Dict[str, torch.Tensor] = {}
@@ -1001,56 +1204,65 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +                    missing = [field for field in DUAL_STREAM_AUDIO_FIELDS if not sm.get(field)]
 +                    if missing:
 +                        raise ValueError(f"Dual-stream sample is missing stem paths: {missing}")
-+                    dual_stream_tensors["motif_target_latents"] = target_latents.squeeze(0).cpu()
-+                    dual_stream_tensors["motif_target_attention_mask"] = torch.ones(
++                    dual_stream_tensors["accompaniment_target_latents"] = target_latents.squeeze(0).cpu()
++                    dual_stream_tensors["accompaniment_target_attention_mask"] = torch.ones(
 +                        target_latents.shape[1], dtype=dtype
 +                    )
-+                    for field in ("motif_seed_audio", "vocal_target_audio"):
-+                        stem = encode_stem_latents(sm[field], vae, dtype, max_duration)
-+                        dual_stream_tensors[field.replace("_audio", "_latents")] = stem
-+                        dual_stream_tensors[field.replace("_audio", "_attention_mask")] = torch.ones(
-+                            stem.shape[0], dtype=dtype
-+                        )
++                    motif_condition = encode_motif_condition_latents(
++                        sm["motif_seed_audio"], vae, dtype, target_sample_count
++                    )
++                    dual_stream_tensors["motif_seed_latents"] = motif_condition
++                    dual_stream_tensors["motif_seed_attention_mask"] = torch.ones(
++                        motif_condition.shape[0], dtype=dtype
++                    )
++                    vocal = encode_stem_latents(
++                        sm["vocal_target_audio"], vae, dtype, max_duration
++                    )
++                    dual_stream_tensors["vocal_target_latents"] = vocal
++                    dual_stream_tensors["vocal_target_attention_mask"] = torch.ones(
++                        vocal.shape[0], dtype=dtype
++                    )
 +                    vocal_length = dual_stream_tensors["vocal_target_latents"].shape[0]
-+                    if vocal_length != target_latents.shape[1]:
++                    motif_length = dual_stream_tensors["motif_seed_latents"].shape[0]
++                    if vocal_length != target_latents.shape[1] or motif_length != target_latents.shape[1]:
 +                        raise ValueError(
-+                            "motif_target_audio and vocal_target_audio must be time-aligned "
-+                            f"({target_latents.shape[1]} vs {vocal_length} latent frames)"
++                            "accompaniment, vocal, and motif-condition latents must be time-aligned "
++                            f"({target_latents.shape[1]} vs {vocal_length} vs {motif_length} frames)"
 +                        )
 +
                  latent_length = target_latents.shape[1]
                  attention_mask = torch.ones(
                      1, latent_length, device=device, dtype=dtype
                  )
- 
+
                  # 3. Text encode
 -                sm = sample_meta.get(af.name, {})
                  caption = sm.get("caption", af.stem)
                  lyrics = sm.get("lyrics", "[Instrumental]")
- 
-@@ -275,10 +344,30 @@ def _pass1_light(
+
+@@ -275,10 +355,30 @@ def _pass1_light(
                          text_enc, tokenizer, lyrics, device, dtype
                      )
- 
+
 +                dual_stream_text_tensors: Dict[str, torch.Tensor] = {}
 +                if dual_stream:
-+                    ostinato_meta = dict(sm)
-+                    ostinato_meta["caption"] = sm["ostinato_caption"]
-+                    ostinato_prompt = _build_simple_prompt(
-+                        ostinato_meta, tag_position=tag_position, use_genre=use_genre
++                    accompaniment_meta = dict(sm)
++                    accompaniment_meta["caption"] = sm["accompaniment_caption"]
++                    accompaniment_prompt = _build_simple_prompt(
++                        accompaniment_meta, tag_position=tag_position, use_genre=use_genre
 +                    )
 +                    with torch.no_grad():
-+                        motif_text_hs, motif_text_mask = encode_text(
-+                            text_enc, tokenizer, ostinato_prompt, device, dtype
++                        accompaniment_text_hs, accompaniment_text_mask = encode_text(
++                            text_enc, tokenizer, accompaniment_prompt, device, dtype
 +                        )
-+                        motif_lyric_hs, motif_lyric_mask = encode_lyrics(
-+                            text_enc, tokenizer, sm.get("ostinato_lyrics", "[Instrumental]"), device, dtype
++                        accompaniment_lyric_hs, accompaniment_lyric_mask = encode_lyrics(
++                            text_enc, tokenizer, sm.get("accompaniment_lyrics", "[Instrumental]"), device, dtype
 +                        )
 +                    dual_stream_text_tensors = {
-+                        "motif_text_hidden_states": motif_text_hs.cpu(),
-+                        "motif_text_attention_mask": motif_text_mask.cpu(),
-+                        "motif_lyric_hidden_states": motif_lyric_hs.cpu(),
-+                        "motif_lyric_attention_mask": motif_lyric_mask.cpu(),
++                        "accompaniment_text_hidden_states": accompaniment_text_hs.cpu(),
++                        "accompaniment_text_attention_mask": accompaniment_text_mask.cpu(),
++                        "accompaniment_lyric_hidden_states": accompaniment_lyric_hs.cpu(),
++                        "accompaniment_lyric_attention_mask": accompaniment_lyric_mask.cpu(),
 +                    }
 +
                  # 4. Save intermediate
@@ -1062,7 +1274,7 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
                          "target_latents": target_latents.squeeze(0).cpu(),
                          "attention_mask": attention_mask.squeeze(0).cpu(),
                          "text_hidden_states": text_hs.cpu(),
-@@ -301,9 +390,10 @@ def _pass1_light(
+@@ -301,9 +401,10 @@ def _pass1_light(
                              "custom_tag": sm.get("custom_tag", ""),
                              "prompt_override": sm.get("prompt_override"),
                          },
@@ -1073,20 +1285,20 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +                intermediate.update(dual_stream_tensors)
 +                intermediate.update(dual_stream_text_tensors)
 +                torch.save(intermediate, tmp_path)
- 
+
                  # Free GPU tensors from this iteration before the next one
                  del target_latents, attention_mask, text_hs, text_mask
-@@ -400,6 +490,32 @@ def _pass2_heavy(
+@@ -400,6 +501,32 @@ def _pass2_heavy(
                      model_device, dtype=model_dtype
                  )
                  latent_length = data["latent_length"]
-+                motif_text_hs = motif_text_mask = None
-+                motif_lyric_hs = motif_lyric_mask = None
-+                if "motif_text_hidden_states" in data:
-+                    motif_text_hs = data["motif_text_hidden_states"].to(model_device, dtype=model_dtype)
-+                    motif_text_mask = data["motif_text_attention_mask"].to(model_device, dtype=model_dtype)
-+                    motif_lyric_hs = data["motif_lyric_hidden_states"].to(model_device, dtype=model_dtype)
-+                    motif_lyric_mask = data["motif_lyric_attention_mask"].to(model_device, dtype=model_dtype)
++                accompaniment_text_hs = accompaniment_text_mask = None
++                accompaniment_lyric_hs = accompaniment_lyric_mask = None
++                if "accompaniment_text_hidden_states" in data:
++                    accompaniment_text_hs = data["accompaniment_text_hidden_states"].to(model_device, dtype=model_dtype)
++                    accompaniment_text_mask = data["accompaniment_text_attention_mask"].to(model_device, dtype=model_dtype)
++                    accompaniment_lyric_hs = data["accompaniment_lyric_hidden_states"].to(model_device, dtype=model_dtype)
++                    accompaniment_lyric_mask = data["accompaniment_lyric_attention_mask"].to(model_device, dtype=model_dtype)
 +
 +                for name, tensor in (
 +                    ("text_hidden_states", text_hs),
@@ -1097,30 +1309,30 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +                            f"encoder input {name} already contains NaN/Inf "
 +                            f"before the condition encoder (dtype={model_dtype})"
 +                        )
-+                if motif_text_hs is not None:
++                if accompaniment_text_hs is not None:
 +                    for name, tensor in (
-+                        ("motif_text_hidden_states", motif_text_hs),
-+                        ("motif_lyric_hidden_states", motif_lyric_hs),
++                        ("accompaniment_text_hidden_states", accompaniment_text_hs),
++                        ("accompaniment_lyric_hidden_states", accompaniment_lyric_hs),
 +                    ):
 +                        if _has_nonfinite(tensor):
 +                            raise FloatingPointError(
 +                                f"encoder input {name} contains NaN/Inf (dtype={model_dtype})"
 +                            )
- 
+
                  # DIT encoder pass (adapter-agnostic: same tensors for
                  # LoRA and LoKR -- only the adapter injection differs).
-@@ -412,9 +528,39 @@ def _pass2_heavy(
+@@ -412,9 +539,40 @@ def _pass2_heavy(
                      device=str(model_device),
                      dtype=model_dtype,
                  )
-+                motif_encoder_hs = motif_encoder_mask = None
-+                if motif_text_hs is not None:
-+                    motif_encoder_hs, motif_encoder_mask = run_encoder(
++                accompaniment_encoder_hs = accompaniment_encoder_mask = None
++                if accompaniment_text_hs is not None:
++                    accompaniment_encoder_hs, accompaniment_encoder_mask = run_encoder(
 +                        model,
-+                        text_hidden_states=motif_text_hs,
-+                        text_attention_mask=motif_text_mask,
-+                        lyric_hidden_states=motif_lyric_hs,
-+                        lyric_attention_mask=motif_lyric_mask,
++                        text_hidden_states=accompaniment_text_hs,
++                        text_attention_mask=accompaniment_text_mask,
++                        lyric_hidden_states=accompaniment_lyric_hs,
++                        lyric_attention_mask=accompaniment_lyric_mask,
 +                        device=str(model_device),
 +                        dtype=model_dtype,
 +                    )
@@ -1142,14 +1354,15 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +                        f"{stage} (dtype={model_dtype}, attention="
 +                        f"{getattr(model.config, '_attn_implementation', 'unknown')})"
 +                    )
- 
+
                  # Free encoder inputs immediately after use
                  del text_hs, text_mask, lyric_hs, lyric_mask
-+                del motif_text_hs, motif_text_mask, motif_lyric_hs, motif_lyric_mask
- 
++                del accompaniment_text_hs, accompaniment_text_mask
++                del accompaniment_lyric_hs, accompaniment_lyric_mask
+
                  # Build context latents (silence-based, standard text2music)
                  if silence_latent.dim() == 2:
-@@ -432,17 +578,34 @@ def _pass2_heavy(
+@@ -432,17 +590,34 @@ def _pass2_heavy(
                  base_name = tmp_path.name.replace(".tmp.pt", ".pt")
                  final_path = out_path / base_name
                  meta = data["metadata"]
@@ -1166,11 +1379,11 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 -                    final_path,
 -                )
 +                    }
-+                if motif_encoder_hs is not None:
++                if accompaniment_encoder_hs is not None:
 +                    final_data.update(
 +                        {
-+                            "motif_encoder_hidden_states": motif_encoder_hs.squeeze(0).cpu(),
-+                            "motif_encoder_attention_mask": motif_encoder_mask.squeeze(0).cpu(),
++                            "accompaniment_encoder_hidden_states": accompaniment_encoder_hs.squeeze(0).cpu(),
++                            "accompaniment_encoder_attention_mask": accompaniment_encoder_mask.squeeze(0).cpu(),
 +                            "vocal_encoder_hidden_states": encoder_hs.squeeze(0).cpu(),
 +                            "vocal_encoder_attention_mask": encoder_mask.squeeze(0).cpu(),
 +                        }
@@ -1178,19 +1391,19 @@ index 8cc3bcc2faf0608446db4b3297284d268392f8c5..1a3e56a73a6656faf8c52f57ebf48e61
 +                for key in (
 +                    "motif_seed_latents",
 +                    "motif_seed_attention_mask",
-+                    "motif_target_latents",
-+                    "motif_target_attention_mask",
++                    "accompaniment_target_latents",
++                    "accompaniment_target_attention_mask",
 +                    "vocal_target_latents",
 +                    "vocal_target_attention_mask",
 +                ):
 +                    if key in data:
 +                        final_data[key] = data[key]
 +                torch.save(final_data, final_path)
- 
+
                  # Free all GPU tensors and the loaded data dict before next iter
                  del encoder_hs, encoder_mask, context_latents, data
 diff --git a/acestep/training_v2/preprocess_discovery.py b/acestep/training_v2/preprocess_discovery.py
-index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee4125dfaf401 100644
+index 60f07ee..a851d3f 100644
 --- a/acestep/training_v2/preprocess_discovery.py
 +++ b/acestep/training_v2/preprocess_discovery.py
 @@ -24,6 +24,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"}
@@ -1200,14 +1413,14 @@ index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee412
 +    dual_stream: bool = False,
  ) -> List[Path]:
      """Discover audio files from a dataset JSON or by scanning a directory.
- 
+
 @@ -47,7 +48,11 @@ def discover_audio_files(
          audio_files: List[Path] = []
          json_dir = Path(dataset_json).parent  # resolve relative paths vs JSON
          for entry in samples:
 -            ap = entry.get("audio_path") or entry.get("filename", "")
 +            ap = (
-+                entry.get("motif_target_audio")
++                entry.get("accompaniment_target_audio")
 +                if dual_stream
 +                else entry.get("audio_path") or entry.get("filename", "")
 +            )
@@ -1224,13 +1437,13 @@ index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee412
 +                for field in (
 +                    "audio_path",
 +                    "motif_seed_audio",
-+                    "motif_target_audio",
++                    "accompaniment_target_audio",
 +                    "vocal_target_audio",
 +                ):
 +                    value = s.get(field)
 +                    if value and not Path(value).is_absolute():
 +                        s[field] = str(json_dir / value)
-+                target_path = s.get("audio_path") or s.get("motif_target_audio")
++                target_path = s.get("audio_path") or s.get("accompaniment_target_audio")
 +                if target_path:
 +                    meta[str(Path(target_path).resolve())] = s
                  # Primary key: explicit filename field
@@ -1243,14 +1456,14 @@ index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee412
 -                elif s.get("audio_path"):
 -                    # Fallback: derive key from audio_path basename
 -                    basename = Path(s["audio_path"]).name
-+                elif s.get("audio_path") or s.get("motif_target_audio"):
++                elif s.get("audio_path") or s.get("accompaniment_target_audio"):
 +                    # Fallback: derive key from the conventional or dual-stream target.
-+                    basename = Path(s.get("audio_path") or s["motif_target_audio"]).name
++                    basename = Path(s.get("audio_path") or s["accompaniment_target_audio"]).name
                      if basename and basename not in meta:
                          meta[basename] = s
              logger.info("[Side-Step] Loaded metadata for %d samples from %s", len(meta), dataset_json)
 @@ -126,7 +145,7 @@ def load_sample_metadata(
- 
+
      # Fill defaults for any audio file without metadata
      for af in audio_files:
 -        if af.name not in meta:
@@ -1259,25 +1472,25 @@ index 60f07ee599a994dce26ddb37c1e0312496b4987e..f6beab0f38928d0b079dfaa857bee412
                  "filename": af.name,
                  "caption": af.stem.replace("_", " ").replace("-", " "),
 diff --git a/acestep/training_v2/tensorboard_utils.py b/acestep/training_v2/tensorboard_utils.py
-index 64705cc0457dde3f9b15090dbb71ff1b7baa757b..763e2cf23972abd86abdfa4b508b6bcf0f0158f2 100644
+index 64705cc..763e2cf 100644
 --- a/acestep/training_v2/tensorboard_utils.py
 +++ b/acestep/training_v2/tensorboard_utils.py
 @@ -72,6 +72,9 @@ class TrainingLogger:
      def log_epoch_loss(self, loss: float, epoch: int) -> None:
          self.log_scalar("train/epoch_loss", loss, epoch)
- 
+
 +    def log_validation_loss(self, loss: float, epoch: int) -> None:
 +        self.log_scalar("validation/loss", loss, epoch)
 +
      def log_grad_norm(self, norm: float, step: int) -> None:
          self.log_scalar("train/grad_norm", norm, step)
- 
+
 diff --git a/acestep/training_v2/trainer_basic_loop.py b/acestep/training_v2/trainer_basic_loop.py
-index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743aed8df8c5 100644
+index deefb8f..1a687fb 100644
 --- a/acestep/training_v2/trainer_basic_loop.py
 +++ b/acestep/training_v2/trainer_basic_loop.py
 @@ -12,6 +12,7 @@ from __future__ import annotations
- 
+
  import logging
  import math
 +import os
@@ -1285,7 +1498,7 @@ index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743a
  from pathlib import Path
  from typing import Any, Dict, Generator, List, Optional, Tuple
 @@ -20,7 +21,13 @@ import torch
- 
+
  from acestep.training_v2.optim import build_optimizer, build_scheduler
  from acestep.training_v2.tensorboard_utils import TrainingLogger
 -from acestep.training_v2.trainer_helpers import configure_memory_features, save_checkpoint, save_final
@@ -1297,18 +1510,18 @@ index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743a
 +    save_rolling_checkpoint,
 +)
  from acestep.training_v2.ui import TrainingUpdate
- 
+
  logger = logging.getLogger(__name__)
 @@ -108,6 +115,7 @@ def run_basic_training_loop(
- 
+
      tb = TrainingLogger(cfg.effective_log_dir)
      train_loader = data_module.train_dataloader()
 +    val_loader = data_module.val_dataloader()
- 
+
      trainable_params = [p for p in module.model.parameters() if p.requires_grad]
      if not trainable_params:
 @@ -218,18 +226,56 @@ def run_basic_training_loop(
- 
+
          epoch_time = time.time() - epoch_start
          avg_epoch_loss = epoch_loss / max(num_updates, 1)
 +        avg_val_loss = _validation_loss(module, val_loader, cfg)
@@ -1326,7 +1539,7 @@ index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743a
 +            msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s, {loss_summary}",
              kind="epoch", epoch=epoch + 1, max_epochs=cfg.max_epochs, epoch_time=epoch_time,
          )
- 
+
 +        rolling_dir = save_rolling_checkpoint(
 +            trainer,
 +            optimizer,
@@ -1395,7 +1608,7 @@ index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743a
 +                    record_loss=False,
 +                    apply_condition_dropout=False,
 +                )
-+                sample_tensor = batch.get("motif_target_latents", batch["target_latents"])
++                sample_tensor = batch.get("accompaniment_target_latents", batch["target_latents"])
 +                sample_count = int(sample_tensor.shape[0])
 +                total_loss += float(loss.item()) * sample_count
 +                total_samples += sample_count
@@ -1403,11 +1616,11 @@ index deefb8f92b7fa34ba927c25055b5c9bd5b571dcd..8c3e2f3f480311a9f63f2cccab8a743a
 +        decoder.train()
 +    return total_loss / max(total_samples, 1)
 diff --git a/acestep/training_v2/trainer_fixed.py b/acestep/training_v2/trainer_fixed.py
-index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043ace8b538 100644
+index 9de3c55..611aadf 100644
 --- a/acestep/training_v2/trainer_fixed.py
 +++ b/acestep/training_v2/trainer_fixed.py
 @@ -17,6 +17,7 @@ from __future__ import annotations
- 
+
  import logging
  import math
 +import os
@@ -1437,11 +1650,11 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +                dual_stream=cfg.dual_stream,
              )
              data_module.setup("fit")
- 
+
 @@ -159,7 +165,13 @@ class FixedLoRATrainer:
                  yield TrainingUpdate(0, 0.0, "[FAIL] No valid samples found in dataset directory", kind="fail")
                  return
- 
+
 -            yield TrainingUpdate(0, 0.0, f"[OK] Loaded {len(data_module.train_dataset)} preprocessed samples", kind="info")
 +            val_count = len(data_module.val_dataset) if data_module.val_dataset is not None else 0
 +            yield TrainingUpdate(
@@ -1450,11 +1663,11 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +                f"[OK] Loaded {len(data_module.train_dataset)} training and {val_count} validation samples",
 +                kind="info",
 +            )
- 
+
              # -- Dispatch to Fabric or basic loop ---------------------------
              if _FABRIC_AVAILABLE:
 @@ -297,7 +309,11 @@ class FixedLoRATrainer:
- 
+
          # -- Dataloader -----------------------------------------------------
          train_loader = data_module.train_dataloader()
 -        train_loader = self.fabric.setup_dataloaders(train_loader)
@@ -1463,7 +1676,7 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +            train_loader = self.fabric.setup_dataloaders(train_loader)
 +        else:
 +            train_loader, val_loader = self.fabric.setup_dataloaders(train_loader, val_loader)
- 
+
          # -- Trainable params / optimizer -----------------------------------
          trainable_params = [p for p in self.module.model.parameters() if p.requires_grad]
 @@ -452,9 +468,17 @@ class FixedLoRATrainer:
@@ -1524,7 +1737,7 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +                    msg=f"[OK] Epoch {epoch + 1}/{cfg.max_epochs} in {epoch_time:.1f}s, {loss_summary}",
                      kind="epoch", epoch=epoch + 1, max_epochs=cfg.max_epochs, epoch_time=epoch_time,
                  )
- 
+
 +                rolling_dir = save_rolling_checkpoint(
 +                    self,
 +                    optimizer,
@@ -1599,7 +1812,7 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +                        record_loss=False,
 +                        apply_condition_dropout=False,
 +                    )
-+                    sample_tensor = batch.get("motif_target_latents", batch["target_latents"])
++                    sample_tensor = batch.get("accompaniment_target_latents", batch["target_latents"])
 +                    sample_count = int(sample_tensor.shape[0])
 +                    total_loss += float(loss.item()) * sample_count
 +                    total_samples += sample_count
@@ -1614,12 +1827,12 @@ index 9de3c55afa80f4e8db1433610e0bcb9616c05c71..b4866b1e36643dc7efccac1e0ddad043
 +            totals = self.fabric.all_reduce(totals, reduce_op="sum")
 +        return float((totals[0] / totals[1].clamp_min(1.0)).item())
 diff --git a/acestep/training_v2/trainer_helpers.py b/acestep/training_v2/trainer_helpers.py
-index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f59d9981c 100644
+index b5de03d..3643cd4 100644
 --- a/acestep/training_v2/trainer_helpers.py
 +++ b/acestep/training_v2/trainer_helpers.py
 @@ -9,7 +9,10 @@ configuration, and module wrapper introspection -- extracted from
  from __future__ import annotations
- 
+
  import logging
 +import json
  import os
@@ -1627,11 +1840,11 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +import shutil
  from pathlib import Path
  from typing import Any, Generator, Optional, Tuple
- 
-@@ -183,6 +186,30 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
+
+@@ -183,6 +186,31 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
              # Fallback for non-PEFT models
              save_lora_weights(module.model, output_dir)
- 
+
 +    conditioner = getattr(raw_decoder, "dual_stream_conditioner", None) if trainer.adapter_type != "lokr" else None
 +    if conditioner is not None:
 +        _save_dual_stream_conditioner(conditioner, output_dir)
@@ -1644,10 +1857,11 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +    config_path.write_text(
 +        json.dumps(
 +            {
-+                "schema_version": 1,
++                "schema_version": 2,
 +                "latent_dim": conditioner.latent_dim,
 +                "condition_dim": conditioner.condition_dim,
-+                "max_tokens": conditioner.max_tokens,
++                "hidden_dim": conditioner.hidden_dim,
++                "patch_size": conditioner.patch_size,
 +            },
 +            indent=2,
 +        ) + "\n",
@@ -1656,10 +1870,10 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +    torch.save(conditioner.state_dict(), weights_path)
 +    logger.info("[OK] Dual-stream conditioner saved to %s", weights_path)
 +
- 
+
  def save_checkpoint(
      trainer: Any,
-@@ -191,6 +218,8 @@ def save_checkpoint(
+@@ -191,6 +219,8 @@ def save_checkpoint(
      epoch: int,
      global_step: int,
      ckpt_dir: str,
@@ -1667,8 +1881,8 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +    val_loss: Optional[float] = None,
  ) -> None:
      """Save a resumable checkpoint that is also inference-ready.
- 
-@@ -207,9 +236,19 @@ def save_checkpoint(
+
+@@ -207,9 +237,19 @@ def save_checkpoint(
          "global_step": global_step,
          "optimizer_state_dict": optimizer.state_dict(),
          "scheduler_state_dict": scheduler.state_dict(),
@@ -1685,13 +1899,13 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +        },
 +        os.path.join(ckpt_dir, "rng_state.pt"),
 +    )
- 
+
      # Also write a safetensors file with epoch/global_step so that
      # load_training_checkpoint (which reads .safetensors) can restore
-@@ -226,6 +265,21 @@ def save_checkpoint(
+@@ -226,6 +266,21 @@ def save_checkpoint(
      except Exception as exc:
          logger.debug("Could not write training_state.safetensors: %s", exc)
- 
+
 +    config_path = Path(ckpt_dir) / "run_config.json"
 +    config_path.write_text(
 +        json.dumps(
@@ -1710,10 +1924,10 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
      logger.info(
          "Training checkpoint saved to %s (epoch %d, step %d)",
          ckpt_dir,
-@@ -234,6 +288,88 @@ def save_checkpoint(
+@@ -234,6 +289,88 @@ def save_checkpoint(
      )
- 
- 
+
+
 +def save_rolling_checkpoint(
 +    trainer: Any,
 +    optimizer: Any,
@@ -1799,16 +2013,16 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
  def save_final(trainer: Any, output_dir: str) -> None:
      """Save final adapter weights (inference-ready, no training state)."""
      save_adapter_flat(trainer, output_dir)
-@@ -326,6 +462,8 @@ def resume_checkpoint(
+@@ -326,6 +463,8 @@ def resume_checkpoint(
      lokr_weights_path = ckpt_dir / "lokr_weights.safetensors"
      state_path = ckpt_dir / "training_state.pt"
- 
+
 +    _validate_checkpoint_fingerprint(trainer, ckpt_dir)
 +
      if lokr_weights_path.exists() and module.lycoris_net is not None:
          # LoKR resume
          if trainer.adapter_type != "lokr":
-@@ -345,6 +483,7 @@ def resume_checkpoint(
+@@ -345,6 +484,7 @@ def resume_checkpoint(
                  optimizer.load_state_dict(state["optimizer_state_dict"])
              if "scheduler_state_dict" in state:
                  scheduler.load_state_dict(state["scheduler_state_dict"])
@@ -1816,17 +2030,17 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
              yield TrainingUpdate(
                  0,
                  0.0,
-@@ -396,6 +535,9 @@ def resume_checkpoint(
+@@ -396,6 +536,9 @@ def resume_checkpoint(
              if hasattr(decoder, "_forward_module"):
                  decoder = decoder._forward_module
              decoder.load_state_dict(state_dict, strict=False)
 +            _load_dual_stream_conditioner(module, ckpt_dir)
 +
 +            _restore_rng_state_file(ckpt_dir)
- 
+
              start_epoch = ckpt_info["epoch"]
              g_step = ckpt_info["global_step"]
-@@ -414,3 +556,35 @@ def resume_checkpoint(
+@@ -414,3 +557,44 @@ def resume_checkpoint(
          0, 0.0, f"[WARN] No valid checkpoint in {ckpt_dir}", kind="warn"
      )
      return None
@@ -1852,6 +2066,15 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +    weights_path = checkpoint_dir / "dual_stream_conditioner.pt"
 +    if not weights_path.exists():
 +        return
++    config_path = checkpoint_dir / "dual_stream_config.json"
++    if not config_path.is_file():
++        raise RuntimeError(f"Dual-stream checkpoint has no config: {config_path}")
++    config = json.loads(config_path.read_text(encoding="utf-8"))
++    if config.get("schema_version") != 2:
++        raise RuntimeError(
++            "This checkpoint uses the obsolete pooled motif-stream adapter. "
++            "Start a new accompaniment/vocal run with dual-stream schema 2."
++        )
 +    decoder = module.model.decoder
 +    while hasattr(decoder, "_forward_module"):
 +        decoder = decoder._forward_module
@@ -1863,7 +2086,7 @@ index b5de03deadca014857a88503d52189c8bb3cb145..0027c92ca5bc92353e651b1db38f087f
 +    conditioner.load_state_dict(state)
 +    logger.info("[OK] Dual-stream conditioner restored from %s", weights_path)
 diff --git a/train.py b/train.py
-index f28b54e622d360bb7309fd95f1bb7d34078859b4..3d419f6b47e3d667eb50438d368fc9276c460971 100644
+index f28b54e..3d419f6 100644
 --- a/train.py
 +++ b/train.py
 @@ -184,6 +184,7 @@ def _run_preprocess(args) -> int:

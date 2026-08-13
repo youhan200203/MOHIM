@@ -13,7 +13,7 @@ def build_dual_stream_manifest(
     *,
     allowed_track_ids: Collection[str] | None = None,
     caption_template: str | None = None,
-    ostinato_caption_template: str = "Isolated {motif_stem} stem performing a recurring ostinato in a {genre} style. {motif_stem_title} only; no vocals and no other instruments.",
+    accompaniment_caption_template: str = "Full instrumental accompaniment for a {genre} song, organized around a recurring {motif_stem} motif. Complete rhythm, harmony, and instrumentation; no vocals.",
     vocal_caption_template: str = "Isolated vocal stem for an {language} {genre} song, singing the provided lyrics. Vocals only; no instrumental accompaniment and no musical instruments.",
 ) -> dict[str, Any]:
     root = Path(processed_dir).expanduser().resolve()
@@ -26,13 +26,16 @@ def build_dual_stream_manifest(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("status") != "accepted":
             continue
+        if metadata.get("schema_version") != 3 or not metadata.get("accompaniment_target_file"):
+            skipped.append(metadata.get("track_id", sample_dir.name))
+            continue
         if allowed is not None and str(metadata.get("track_id")) not in allowed:
             continue
         lyrics_path = sample_dir / "lyrics.txt"
         motif_seed = sample_dir / metadata["motif_seed_file"]
-        motif_target = sample_dir / metadata["motif_target_file"]
+        accompaniment_target = sample_dir / metadata["accompaniment_target_file"]
         vocal_target = sample_dir / metadata["vocal_target_file"]
-        if not all(path.is_file() for path in (lyrics_path, motif_seed, motif_target, vocal_target)):
+        if not all(path.is_file() for path in (lyrics_path, motif_seed, accompaniment_target, vocal_target)):
             skipped.append(metadata.get("track_id", sample_dir.name))
             continue
         lyrics = lyrics_path.read_text(encoding="utf-8").strip()
@@ -50,20 +53,20 @@ def build_dual_stream_manifest(
             "motif_stem": motif_stem,
             "motif_stem_title": motif_stem.capitalize(),
         }
-        ostinato_caption = ostinato_caption_template.format(**prompt_fields)
+        accompaniment_caption = accompaniment_caption_template.format(**prompt_fields)
         active_vocal_template = vocal_caption_template if caption_template is None else caption_template
         vocal_caption = active_vocal_template.format(**prompt_fields)
         samples.append(
             {
-                "motif_target_audio": str(motif_target),
+                "accompaniment_target_audio": str(accompaniment_target),
                 "motif_seed_audio": str(motif_seed),
                 "vocal_target_audio": str(vocal_target),
-                "audio_path": str(motif_target),
-                "filename": f"{metadata['track_id']}_{motif_stem}{motif_target.suffix}",
+                "audio_path": str(accompaniment_target),
+                "filename": f"{metadata['track_id']}_accompaniment{accompaniment_target.suffix}",
                 "caption": vocal_caption,
                 "lyrics": lyrics,
-                "ostinato_caption": ostinato_caption,
-                "ostinato_lyrics": "[Instrumental]",
+                "accompaniment_caption": accompaniment_caption,
+                "accompaniment_lyrics": "[Instrumental]",
                 "vocal_caption": vocal_caption,
                 "vocal_lyrics": lyrics,
                 "bpm": None,

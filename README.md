@@ -32,6 +32,7 @@ genius_pop_seed.json
 → YouTube 후보 검색 및 음원 다운로드
 → HTDemucs 6-stem 분리
 → 반복 4마디 모티프 선택
+→ vocals를 제외한 stem을 accompaniment로 합산
 → dual_stream_manifest.json 생성
 → ACE-Step tensor 전처리
 → LoRA 학습
@@ -54,11 +55,18 @@ Demucs 처리 결과는 다음처럼 저장된다.
 ```text
 MyDrive/MOHIM/motif_dataset/<TRACK_ID>/
 ├── vocals.flac
-├── guitar.flac          # 곡에 따라 piano, bass 또는 other
-├── motif.flac
+├── accompaniment.flac  # vocals를 제외한 Demucs stem 전체 합
+├── motif.flac           # 선택된 stem에서 추출한 4마디 조건
+├── bass.flac            # Demucs가 반환한 경우 저장
+├── guitar.flac
+├── piano.flac
+├── other.flac
 ├── lyrics.txt
 └── metadata.json
 ```
+
+모티프 선택 결과를 직접 비교할 수 있도록 vocals와 drums를 제외한 개별 stem도 저장한다.
+drums는 개별 파일로 저장하지 않지만 `accompaniment.flac` 합산에는 포함된다.
 
 처음에는 노트북의 `MAX_SONGS = 3`으로 결과를 듣고 확인한 뒤 전체 처리 시 `None`으로
 바꾼다. 완성된 샘플은 다시 실행해도 건너뛴다.
