@@ -1,4 +1,4 @@
-"""Select a melodic stem and find a repeated four-bar motif."""
+"""Find a repeated four-bar motif in each candidate stem and select the best."""
 
 from __future__ import annotations
 
@@ -170,30 +170,54 @@ class MotifExtractor:
         self.beat_tracker = beat_tracker
         self.config = config or MotifConfig()
 
-    def select_stem(self, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> tuple[str, dict[str, dict[str, float]]]:
-        scores = {
-            name: score_motif_candidate(stems[name], full_wav, sample_rate)
-            for name in self.config.candidate_stems
-            if name in stems
-        }
-        if not scores:
-            raise ValueError("No configured motif candidate stems were produced by the separator.")
-        name, _ = max(scores.items(), key=lambda item: item[1]["total"])
-        return name, scores
-
     def extract(self, audio_path: str | Path, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> dict[str, Any]:
-        import librosa
-        import torch
-
-        full_audio, _ = librosa.load(str(audio_path), sr=sample_rate, mono=False)
-        full_wav = torch.as_tensor(full_audio, dtype=torch.float32)
-        if full_wav.ndim == 1:
-            full_wav = full_wav.unsqueeze(0)
-        name, scores = self.select_stem(stems, full_wav, sample_rate)
+        """Return the strongest first-passing motif across all candidate stems."""
+        del full_wav  # Kept in the public API for DatasetBuilder compatibility.
+        candidates = [name for name in self.config.candidate_stems if name in stems]
+        if not candidates:
+            raise ValueError("No configured motif candidate stems were produced by the separator.")
         _, downbeats = self.beat_tracker(str(audio_path))
-        match = find_repeating_motif(stems[name], sample_rate, downbeats, self.config)
-        if match is None:
+        downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
+        matches = {
+            name: find_repeating_motif(stems[name], sample_rate, downbeats, self.config)
+            for name in candidates
+        }
+
+        scores: dict[str, dict[str, float | bool | None]] = {}
+        for name, match in matches.items():
+            if match is None:
+                scores[name] = {
+                    "matched": False,
+                    "start_sec": None,
+                    "end_sec": None,
+                    "similarity": 0.0,
+                    "dominance": 0.0,
+                    "total": 0.0,
+                }
+                continue
+            start, end, similarity = match
+            candidate_rms = float(stems[name][:, start:end].square().mean().sqrt())
+            total_rms = sum(
+                float(stems[other][:, start:end].square().mean().sqrt())
+                for other in candidates
+            )
+            dominance = candidate_rms / max(total_rms, 1e-8)
+            total = 0.85 * similarity + 0.15 * dominance
+            scores[name] = {
+                "matched": True,
+                "start_sec": start / sample_rate,
+                "end_sec": end / sample_rate,
+                "similarity": float(similarity),
+                "dominance": float(dominance),
+                "total": float(total),
+            }
+
+        matched = [name for name in candidates if matches[name] is not None]
+        if not matched:
             raise ValueError("No repeated four-bar motif passed the similarity threshold.")
+        name = max(matched, key=lambda candidate: float(scores[candidate]["total"]))
+        match = matches[name]
+        assert match is not None
         start, end, similarity = match
         return {
             "stem_name": name,

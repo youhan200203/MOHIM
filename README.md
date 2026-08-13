@@ -67,6 +67,8 @@ MyDrive/MOHIM/motif_dataset/<TRACK_ID>/
 
 모티프 선택 결과를 직접 비교할 수 있도록 vocals와 drums를 제외한 개별 stem도 저장한다.
 drums는 개별 파일로 저장하지 않지만 `accompaniment.flac` 합산에는 포함된다.
+각 후보 stem에서 앞 30초 내 최초 통과 motif를 하나씩 찾은 뒤, 반복 유사도 85%와
+해당 구간의 stem 비중 15%를 합산해 최종 motif를 선택한다.
 
 처음에는 노트북의 `MAX_SONGS = 3`으로 결과를 듣고 확인한 뒤 전체 처리 시 `None`으로
 바꾼다. 완성된 샘플은 다시 실행해도 건너뛴다.

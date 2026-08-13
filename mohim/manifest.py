@@ -26,7 +26,7 @@ def build_dual_stream_manifest(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("status") != "accepted":
             continue
-        if metadata.get("schema_version") != 3 or not metadata.get("accompaniment_target_file"):
+        if metadata.get("schema_version") != 4 or not metadata.get("accompaniment_target_file"):
             skipped.append(metadata.get("track_id", sample_dir.name))
             continue
         if allowed is not None and str(metadata.get("track_id")) not in allowed:

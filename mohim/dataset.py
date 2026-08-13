@@ -90,7 +90,7 @@ class DatasetBuilder:
         required = [sample_dir / name for name in (*required_names, *debug_stem_names) if name]
         required.append(sample_dir / "lyrics.txt")
         if (
-            metadata.get("schema_version") == 3
+            metadata.get("schema_version") == 4
             and metadata.get("status") == "accepted"
             and all(required_names)
             and isinstance(stem_files, dict)
@@ -160,7 +160,7 @@ class DatasetBuilder:
         (sample_dir / "lyrics.txt").write_text(track.lyrics.strip() + "\n", encoding="utf-8")
 
         metadata: dict[str, Any] = {
-            "schema_version": 3,
+            "schema_version": 4,
             "status": "accepted",
             "track_id": track.track_id,
             "artist": track.artist,

@@ -18,7 +18,7 @@ class ManifestTests(unittest.TestCase):
                 (sample / name).touch()
             (sample / "lyrics.txt").write_text("hello world\n", encoding="utf-8")
             metadata = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "status": "accepted",
                 "track_id": "abc",
                 "artist": "Artist",
