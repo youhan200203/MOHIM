@@ -120,13 +120,29 @@ def find_repeating_motif(
     downbeats: Iterable[float],
     config: MotifConfig,
 ) -> tuple[int, int, float] | None:
+    """Return the first candidate that passes the configured threshold."""
+    for start, end, similarity in score_repeating_motifs(
+        stem_wav, sample_rate, downbeats, config
+    ):
+        if similarity >= config.similarity_threshold:
+            return start, end, similarity
+    return None
+
+
+def score_repeating_motifs(
+    stem_wav: Any,
+    sample_rate: int,
+    downbeats: Iterable[float],
+    config: MotifConfig,
+) -> list[tuple[int, int, float]]:
+    """Score every four-bar start downbeat inside the search window."""
     import librosa
     from sklearn.metrics.pairwise import cosine_similarity
 
     mono = stem_wav.mean(0).detach().cpu().numpy()
     downbeats_array = np.asarray(list(downbeats), dtype=np.float64).reshape(-1)
     if len(downbeats_array) <= config.bars * 2:
-        return None
+        return []
     bar_length = float(np.median(np.diff(downbeats_array)))
     hop_length = 512
     motif_length = bar_length * config.bars
@@ -148,6 +164,7 @@ def find_repeating_motif(
         leading_silence = float(np.flatnonzero(active)[0] / len(active)) if np.any(active) else 1.0
         segments.append((start_sec, end_sec, onset_segment, chroma_segment, leading_silence))
 
+    candidates: list[tuple[int, int, float]] = []
     for start_sec, end_sec, first_onset, first_chroma, leading_silence in segments:
         if start_sec >= config.search_seconds:
             break
@@ -160,9 +177,21 @@ def find_repeating_motif(
             scores.append(float(0.3 * onset_similarity + 0.7 * chroma_similarity))
         mean_score = np.mean(scores) if scores else -1.0
         adjusted = mean_score * (1.0 - leading_silence)
-        if adjusted >= config.similarity_threshold:
-            return int(start_sec * sample_rate), int(end_sec * sample_rate), float(adjusted)
-    return None
+        candidates.append(
+            (int(start_sec * sample_rate), int(end_sec * sample_rate), float(adjusted))
+        )
+    return candidates
+
+
+def melodic_accompaniment(stems: dict[str, Any], candidate_stems: Iterable[str]) -> Any:
+    """Sum available melodic stems without drums, vocals, or per-stem normalization."""
+    selected = [stems[name] for name in candidate_stems if name in stems]
+    if not selected:
+        raise ValueError("No configured motif candidate stems were produced by the separator.")
+    reference_shape = selected[0].shape
+    if any(stem.shape != reference_shape for stem in selected):
+        raise ValueError("Motif candidate stems are not time-aligned.")
+    return sum(selected[1:], selected[0].clone())
 
 
 class MotifExtractor:
@@ -227,7 +256,46 @@ class MotifExtractor:
             "start_sec": start / sample_rate,
             "end_sec": end / sample_rate,
             "similarity": similarity,
-            "audio": stems[name][:, start:end],
+            "audio": melodic_accompaniment(stems, candidates)[:, start:end],
+        }
+
+    def score_all(
+        self,
+        audio_path: str | Path,
+        stems: dict[str, Any],
+        sample_rate: int,
+    ) -> dict[str, Any]:
+        """Return every pre-threshold candidate for manual calibration."""
+        candidates = [name for name in self.config.candidate_stems if name in stems]
+        if not candidates:
+            raise ValueError("No configured motif candidate stems were produced by the separator.")
+        _, downbeats = self.beat_tracker(str(audio_path))
+        downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
+        rows: list[dict[str, float | int | str]] = []
+        for name in candidates:
+            matches = score_repeating_motifs(stems[name], sample_rate, downbeats, self.config)
+            for candidate_index, (start, end, similarity) in enumerate(matches):
+                candidate_rms = float(stems[name][:, start:end].square().mean().sqrt())
+                total_rms = sum(
+                    float(stems[other][:, start:end].square().mean().sqrt())
+                    for other in candidates
+                )
+                dominance = candidate_rms / max(total_rms, 1e-8)
+                rows.append(
+                    {
+                        "stem_name": name,
+                        "candidate_index": candidate_index,
+                        "start_sec": start / sample_rate,
+                        "end_sec": end / sample_rate,
+                        "similarity": float(similarity),
+                        "dominance": float(dominance),
+                        "total": float(0.85 * similarity + 0.15 * dominance),
+                    }
+                )
+        return {
+            "candidates": rows,
+            "melodic_accompaniment": melodic_accompaniment(stems, candidates),
+            "sample_rate": sample_rate,
         }
 
 
