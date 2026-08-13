@@ -189,7 +189,17 @@ class MotifScoreTests(unittest.TestCase):
             pairwise.cosine_similarity = lambda first, _second: np.array(
                 [[0.5 if first.shape[1] == 64 else 0.8]]
             )
-            mismatched = score_repeating_motifs(
+            difference_below_threshold = score_repeating_motifs(
+                stem,
+                sample_rate=100,
+                downbeats=[0.0, 2.0, 4.0, 6.0],
+                config=MotifConfig(bars=1),
+            )
+
+            pairwise.cosine_similarity = lambda first, _second: np.array(
+                [[0.4 if first.shape[1] == 64 else 0.8]]
+            )
+            difference_at_threshold = score_repeating_motifs(
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
@@ -203,7 +213,8 @@ class MotifScoreTests(unittest.TestCase):
             self.assertAlmostEqual(onset_similarity, 0.6)
             self.assertAlmostEqual(chroma_similarity, 0.8)
             self.assertAlmostEqual(similarity, 0.74)
-        self.assertEqual(mismatched, [])
+        self.assertEqual(len(difference_below_threshold), 3)
+        self.assertEqual(difference_at_threshold, [])
 
 
 if __name__ == "__main__":

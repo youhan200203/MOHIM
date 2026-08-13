@@ -183,7 +183,7 @@ def score_repeating_motifs(
             continue
         onset_similarity = float(np.mean(onset_scores))
         chroma_similarity = float(np.mean(chroma_scores))
-        if abs(onset_similarity - chroma_similarity) >= 0.30:
+        if abs(onset_similarity - chroma_similarity) >= 0.40:
             continue
         similarity = 0.3 * onset_similarity + 0.7 * chroma_similarity
         candidates.append(
