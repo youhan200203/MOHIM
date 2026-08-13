@@ -149,11 +149,11 @@ class MotifScoreTests(unittest.TestCase):
         librosa = types.ModuleType("librosa")
         librosa.feature = types.SimpleNamespace(
             rms=lambda **_kwargs: np.array(
-                [[0.001] * 5 + [0.02, 0.0, 0.0, 0.0, 0.0] + [0.02] * 10]
+                [[0.02] * 6 + [0.001] * 4 + [0.02] * 7 + [0.001] * 3 + [0.02] * 20]
             ),
-            chroma_cens=lambda **_kwargs: np.ones((12, 20)),
+            chroma_cens=lambda **_kwargs: np.ones((12, 40)),
         )
-        librosa.onset = types.SimpleNamespace(onset_strength=lambda **_kwargs: np.ones(20))
+        librosa.onset = types.SimpleNamespace(onset_strength=lambda **_kwargs: np.ones(40))
         librosa.time_to_frames = lambda seconds, **_kwargs: int(seconds * 5)
 
         def amplitude_to_db(values, ref):
@@ -166,9 +166,9 @@ class MotifScoreTests(unittest.TestCase):
         metrics = types.ModuleType("sklearn.metrics")
         pairwise = types.ModuleType("sklearn.metrics.pairwise")
         pairwise.cosine_similarity = lambda first, _second: np.array(
-            [[0.2 if first.shape[1] == 64 else 0.8]]
+            [[0.6 if first.shape[1] == 64 else 0.8]]
         )
-        stem = _FakeAudioStem(np.zeros(400))
+        stem = _FakeAudioStem(np.zeros(800))
 
         with patch.dict(
             sys.modules,
@@ -182,17 +182,28 @@ class MotifScoreTests(unittest.TestCase):
             result = score_repeating_motifs(
                 stem,
                 sample_rate=100,
-                downbeats=[0.0, 1.0, 2.0, 3.0],
+                downbeats=[0.0, 2.0, 4.0, 6.0],
+                config=MotifConfig(bars=1),
+            )
+
+            pairwise.cosine_similarity = lambda first, _second: np.array(
+                [[0.5 if first.shape[1] == 64 else 0.8]]
+            )
+            mismatched = score_repeating_motifs(
+                stem,
+                sample_rate=100,
+                downbeats=[0.0, 2.0, 4.0, 6.0],
                 config=MotifConfig(bars=1),
             )
 
         self.assertEqual(len(result), 3)
-        self.assertEqual([row[0] for row in result], [100, 200, 300])
-        self.assertEqual([row[5] for row in result], [0.2, 1.0, 1.0])
+        self.assertEqual([row[0] for row in result], [200, 400, 600])
+        self.assertEqual([row[5] for row in result], [0.7, 1.0, 1.0])
         for _, _, onset_similarity, chroma_similarity, similarity, _ in result:
-            self.assertAlmostEqual(onset_similarity, 0.2)
+            self.assertAlmostEqual(onset_similarity, 0.6)
             self.assertAlmostEqual(chroma_similarity, 0.8)
-            self.assertAlmostEqual(similarity, 0.62)
+            self.assertAlmostEqual(similarity, 0.74)
+        self.assertEqual(mismatched, [])
 
 
 if __name__ == "__main__":

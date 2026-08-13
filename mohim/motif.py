@@ -19,7 +19,7 @@ class MotifConfig:
     search_seconds: float = 30.0
     similarity_threshold: float = 0.56
     silence_db: float = -40.0
-    min_presence: float = 0.20
+    min_presence: float = 0.70
     min_stem_score: float = 0.25
 
 
@@ -183,6 +183,8 @@ def score_repeating_motifs(
             continue
         onset_similarity = float(np.mean(onset_scores))
         chroma_similarity = float(np.mean(chroma_scores))
+        if abs(onset_similarity - chroma_similarity) >= 0.30:
+            continue
         similarity = 0.3 * onset_similarity + 0.7 * chroma_similarity
         candidates.append(
             (
