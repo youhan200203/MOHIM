@@ -8,6 +8,7 @@ import numpy as np
 from mohim.motif import (
     MotifConfig,
     MotifExtractor,
+    _max_shifted_cosine_similarity,
     find_repeating_motif,
     melodic_accompaniment,
     movement_score,
@@ -68,6 +69,26 @@ class _FakeAudioStem:
 
 
 class MotifScoreTests(unittest.TestCase):
+    def test_onset_similarity_uses_best_shift_within_three_frames(self):
+        first = np.zeros(256)
+        second = np.zeros(256)
+        first[100] = 1.0
+        second[103] = 1.0
+
+        def cosine_similarity(left, right):
+            denominator = np.linalg.norm(left) * np.linalg.norm(right)
+            score = float(np.dot(left.ravel(), right.ravel()) / denominator) if denominator else 0.0
+            return np.array([[score]])
+
+        similarity = _max_shifted_cosine_similarity(
+            first,
+            second,
+            max_shift=3,
+            cosine_similarity=cosine_similarity,
+        )
+
+        self.assertAlmostEqual(similarity, 1.0)
+
     def test_melodic_accompaniment_excludes_drums_and_vocals(self):
         stems = {
             "guitar": _FakeStem(0.4),
@@ -182,9 +203,13 @@ class MotifScoreTests(unittest.TestCase):
         sklearn = types.ModuleType("sklearn")
         metrics = types.ModuleType("sklearn.metrics")
         pairwise = types.ModuleType("sklearn.metrics.pairwise")
-        pairwise.cosine_similarity = lambda first, _second: np.array(
-            [[0.6 if first.shape[1] == 64 else 0.8]]
-        )
+        cosine_shapes = []
+
+        def cosine_similarity(first, second):
+            cosine_shapes.append((first.shape[1], second.shape[1]))
+            return np.array([[0.6 if first.shape[1] <= 256 else 0.8]])
+
+        pairwise.cosine_similarity = cosine_similarity
         stem_values = np.arange(800, dtype=np.float64)
         stem = _FakeAudioStem(stem_values)
 
@@ -205,7 +230,7 @@ class MotifScoreTests(unittest.TestCase):
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.5 if first.shape[1] == 64 else 0.8]]
+                [[0.5 if first.shape[1] <= 256 else 0.8]]
             )
             difference_below_threshold = score_repeating_motifs(
                 stem,
@@ -215,7 +240,7 @@ class MotifScoreTests(unittest.TestCase):
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.4 if first.shape[1] == 64 else 0.8]]
+                [[0.4 if first.shape[1] <= 256 else 0.8]]
             )
             difference_at_threshold = score_repeating_motifs(
                 stem,
@@ -225,7 +250,7 @@ class MotifScoreTests(unittest.TestCase):
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.39 if first.shape[1] == 64 else 0.8]]
+                [[0.39 if first.shape[1] <= 256 else 0.8]]
             )
             difference_above_threshold = score_repeating_motifs(
                 stem,
@@ -244,6 +269,8 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(len(difference_below_threshold), 3)
         self.assertEqual(len(difference_at_threshold), 3)
         self.assertEqual(difference_above_threshold, [])
+        self.assertIn((256, 256), cosine_shapes)
+        self.assertIn((768, 768), cosine_shapes)
         self.assertEqual(len(onset_inputs), 4)
         for onset_input in onset_inputs:
             self.assertEqual(onset_input["n_fft"], 2048)

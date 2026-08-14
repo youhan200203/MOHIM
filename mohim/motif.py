@@ -112,6 +112,27 @@ def _resize_time(feature: np.ndarray, target_frames: int) -> np.ndarray:
     return np.vstack([np.interp(new_x, old_x, row) for row in feature])
 
 
+def _max_shifted_cosine_similarity(
+    first: np.ndarray,
+    second: np.ndarray,
+    max_shift: int,
+    cosine_similarity: Any,
+) -> float:
+    scores = []
+    for shift in range(-max_shift, max_shift + 1):
+        if shift < 0:
+            first_overlap = first[-shift:]
+            second_overlap = second[:shift]
+        elif shift > 0:
+            first_overlap = first[:-shift]
+            second_overlap = second[shift:]
+        else:
+            first_overlap = first
+            second_overlap = second
+        scores.append(float(cosine_similarity(first_overlap[None], second_overlap[None])[0, 0]))
+    return max(scores)
+
+
 def find_repeating_motif(
     stem_wav: Any,
     sample_rate: int,
@@ -165,7 +186,7 @@ def score_repeating_motifs(
             continue
         start_frame = int(librosa.time_to_frames(start_sec, sr=sample_rate, hop_length=hop_length))
         end_frame = int(librosa.time_to_frames(end_sec, sr=sample_rate, hop_length=hop_length))
-        onset_segment = _resize_time(onset[None, start_frame:end_frame], 64).ravel()
+        onset_segment = _resize_time(onset[None, start_frame:end_frame], 256).ravel()
         chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64).ravel()
         active = rms_db[start_frame:end_frame] > config.silence_db
         active_ratio = float(np.sum(active) / len(active)) if len(active) else 0.0
@@ -182,7 +203,12 @@ def score_repeating_motifs(
         for other_start, _, other_onset, other_chroma, _ in segments:
             if abs(other_start - start_sec) < motif_length * 0.9:
                 continue
-            onset_similarity = cosine_similarity(first_onset[None], other_onset[None])[0, 0]
+            onset_similarity = _max_shifted_cosine_similarity(
+                first_onset,
+                other_onset,
+                max_shift=3,
+                cosine_similarity=cosine_similarity,
+            )
             chroma_similarity = cosine_similarity(first_chroma[None], other_chroma[None])[0, 0]
             onset_scores.append(float(onset_similarity))
             chroma_scores.append(float(chroma_similarity))
