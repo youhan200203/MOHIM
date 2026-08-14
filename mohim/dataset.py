@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,6 +11,13 @@ from typing import Any, Iterable
 from .local_dataset import LocalTrack, index_audio_files, resolve_audio_path
 from .motif import MotifExtractor
 from .separator import StemSeparator, save_audio
+
+
+def _track_directory_name(track: LocalTrack) -> str:
+    label = f"{track.artist} - {track.title}" if track.artist else track.title
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", label)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:120] or track.track_id
 
 
 def _sum_accompaniment(stems: dict[str, Any]) -> Any:
@@ -102,7 +110,7 @@ class DatasetBuilder:
         return None
 
     def process_track(self, track: LocalTrack, audio_index: dict[str, Path]) -> BuildResult:
-        sample_dir = self.output_dir / track.track_id
+        sample_dir = self.output_dir / _track_directory_name(track)
         cached = self._accepted_result(track, sample_dir)
         if cached:
             return cached

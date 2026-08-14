@@ -158,13 +158,19 @@ class MotifScoreTests(unittest.TestCase):
 
     def test_repeating_motifs_filter_by_absolute_active_ratio_and_report_components(self):
         librosa = types.ModuleType("librosa")
+        onset_inputs = []
+
+        def onset_strength(**kwargs):
+            onset_inputs.append(kwargs)
+            return np.ones(44)
+
         librosa.feature = types.SimpleNamespace(
             rms=lambda **_kwargs: np.array(
                 [[0.02] * 7 + [0.001] * 3 + [0.02] * 8 + [0.001] * 2 + [0.02] * 20]
             ),
             chroma_cens=lambda **_kwargs: np.ones((12, 40)),
         )
-        librosa.onset = types.SimpleNamespace(onset_strength=lambda **_kwargs: np.ones(40))
+        librosa.onset = types.SimpleNamespace(onset_strength=onset_strength)
         librosa.time_to_frames = lambda seconds, **_kwargs: int(seconds * 5)
 
         def amplitude_to_db(values, ref):
@@ -179,7 +185,8 @@ class MotifScoreTests(unittest.TestCase):
         pairwise.cosine_similarity = lambda first, _second: np.array(
             [[0.6 if first.shape[1] == 64 else 0.8]]
         )
-        stem = _FakeAudioStem(np.zeros(800))
+        stem_values = np.arange(800, dtype=np.float64)
+        stem = _FakeAudioStem(stem_values)
 
         with patch.dict(
             sys.modules,
@@ -237,6 +244,12 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(len(difference_below_threshold), 3)
         self.assertEqual(len(difference_at_threshold), 3)
         self.assertEqual(difference_above_threshold, [])
+        self.assertEqual(len(onset_inputs), 4)
+        for onset_input in onset_inputs:
+            self.assertEqual(onset_input["n_fft"], 2048)
+            self.assertEqual(len(onset_input["y"]), 2048 + len(stem_values))
+            np.testing.assert_array_equal(onset_input["y"][:2048], np.zeros(2048))
+            np.testing.assert_array_equal(onset_input["y"][2048:], stem_values)
 
 
 if __name__ == "__main__":

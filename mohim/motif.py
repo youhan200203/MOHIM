@@ -143,10 +143,19 @@ def score_repeating_motifs(
         return []
     bar_length = float(np.median(np.diff(downbeats_array)))
     hop_length = 512
+    onset_n_fft = 2048
+    onset_preroll_frames = onset_n_fft // hop_length
     motif_length = bar_length * config.bars
-    onset = librosa.onset.onset_strength(y=mono, sr=sample_rate, hop_length=hop_length)
+    padded_mono = np.pad(mono, (onset_preroll_frames * hop_length, 0))
+    padded_onset = librosa.onset.onset_strength(
+        y=padded_mono,
+        sr=sample_rate,
+        hop_length=hop_length,
+        n_fft=onset_n_fft,
+    )
     chroma = librosa.feature.chroma_cens(y=mono, sr=sample_rate, hop_length=hop_length)
     rms = librosa.feature.rms(y=mono, hop_length=hop_length)[0]
+    onset = padded_onset[onset_preroll_frames : onset_preroll_frames + len(rms)]
     rms_db = librosa.amplitude_to_db(rms + 1e-8, ref=1.0)
 
     segments: list[tuple[float, float, np.ndarray, np.ndarray, float]] = []
