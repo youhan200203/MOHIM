@@ -17,9 +17,11 @@ class MotifConfig:
     candidate_stems: tuple[str, ...] = ("guitar", "piano", "bass", "other")
     bars: int = 4
     search_seconds: float = 30.0
-    similarity_threshold: float = 0.56
     silence_db: float = -40.0
     min_presence: float = 0.80
+    max_similarity_difference: float = 0.40
+    onset_threshold: float = 0.60
+    pitch_class_span_threshold: float = 0.30
     min_stem_score: float = 0.25
 
 
@@ -133,17 +135,49 @@ def _max_shifted_cosine_similarity(
     return max(scores)
 
 
+def pitch_class_span(audio: Any, sample_rate: int, hop_length: int = 512) -> float:
+    """Return the fraction of pitch classes active in at least 10% of valid frames."""
+    import librosa
+
+    if hasattr(audio, "detach"):
+        mono = audio.mean(0).detach().cpu().numpy()
+    else:
+        values = np.asarray(audio)
+        mono = values.mean(0) if values.ndim > 1 else values
+    chroma = librosa.feature.chroma_cens(y=mono, sr=sample_rate, hop_length=hop_length)
+    chroma_sum = chroma.sum(axis=0, keepdims=True)
+    valid_chroma = chroma_sum.ravel() > 1e-8
+    if not np.any(valid_chroma):
+        return 0.0
+    chroma_norm = np.divide(
+        chroma,
+        chroma_sum,
+        out=np.zeros_like(chroma),
+        where=chroma_sum > 1e-8,
+    )
+    valid_norm = chroma_norm[:, valid_chroma]
+    active_pc = valid_norm >= (0.60 * valid_norm.max(axis=0, keepdims=True))
+    pitch_class_count = int(np.sum(np.mean(active_pc, axis=1) >= 0.10))
+    return pitch_class_count / 12.0
+
+
 def find_repeating_motif(
     stem_wav: Any,
     sample_rate: int,
     downbeats: Iterable[float],
     config: MotifConfig,
+    candidate_wav: Any | None = None,
 ) -> tuple[int, int, float] | None:
-    """Return the first candidate that passes the configured threshold."""
-    for start, end, _, _, similarity, _ in score_repeating_motifs(
+    """Return the first candidate that passes onset and pitch-span thresholds."""
+    feature_audio = stem_wav if candidate_wav is None else candidate_wav
+    for start, end, onset_similarity, _, similarity, _ in score_repeating_motifs(
         stem_wav, sample_rate, downbeats, config
     ):
-        if similarity >= config.similarity_threshold:
+        span = pitch_class_span(feature_audio[:, start:end], sample_rate)
+        if (
+            onset_similarity >= config.onset_threshold
+            and span > config.pitch_class_span_threshold
+        ):
             return start, end, similarity
     return None
 
@@ -216,7 +250,7 @@ def score_repeating_motifs(
             continue
         onset_similarity = float(np.mean(onset_scores))
         chroma_similarity = float(np.mean(chroma_scores))
-        if abs(onset_similarity - chroma_similarity) > 0.40:
+        if abs(onset_similarity - chroma_similarity) > config.max_similarity_difference:
             continue
         similarity = 0.3 * onset_similarity + 0.7 * chroma_similarity
         candidates.append(
@@ -249,52 +283,63 @@ class MotifExtractor:
         self.config = config or MotifConfig()
 
     def extract(self, audio_path: str | Path, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> dict[str, Any]:
-        """Return the strongest first-passing motif across all candidate stems."""
+        """Return the strongest first onset-and-pitch-passing motif across stems."""
         del full_wav  # Kept in the public API for DatasetBuilder compatibility.
+        result = self.score_all(audio_path, stems, sample_rate)
         candidates = [name for name in self.config.candidate_stems if name in stems]
-        if not candidates:
-            raise ValueError("No configured motif candidate stems were produced by the separator.")
-        _, downbeats = self.beat_tracker(str(audio_path))
-        downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
-        matches = {
-            name: find_repeating_motif(stems[name], sample_rate, downbeats, self.config)
-            for name in candidates
-        }
+        eligible = [
+            row
+            for row in result["candidates"]
+            if row["onset_similarity"] >= self.config.onset_threshold
+            and row["pitch_class_span"] > self.config.pitch_class_span_threshold
+        ]
+        first_by_stem: dict[str, dict[str, float | int | str]] = {}
+        for row in sorted(eligible, key=lambda item: float(item["start_sec"])):
+            first_by_stem.setdefault(str(row["stem_name"]), row)
 
         scores: dict[str, dict[str, float | bool | None]] = {}
-        for name, match in matches.items():
+        for name in candidates:
+            match = first_by_stem.get(name)
             if match is None:
                 scores[name] = {
                     "matched": False,
                     "start_sec": None,
                     "end_sec": None,
+                    "active_ratio": None,
+                    "onset_similarity": None,
+                    "chroma_similarity": None,
+                    "pitch_class_span": None,
                     "similarity": 0.0,
                 }
                 continue
-            start, end, similarity = match
             scores[name] = {
                 "matched": True,
-                "start_sec": start / sample_rate,
-                "end_sec": end / sample_rate,
-                "similarity": float(similarity),
+                "start_sec": float(match["start_sec"]),
+                "end_sec": float(match["end_sec"]),
+                "active_ratio": float(match["active_ratio"]),
+                "onset_similarity": float(match["onset_similarity"]),
+                "chroma_similarity": float(match["chroma_similarity"]),
+                "pitch_class_span": float(match["pitch_class_span"]),
+                "similarity": float(match["similarity"]),
             }
 
-        matched = [name for name in candidates if matches[name] is not None]
-        if not matched:
-            raise ValueError("No repeated four-bar motif passed the similarity threshold.")
-        name = max(matched, key=lambda candidate: float(scores[candidate]["similarity"]))
-        match = matches[name]
-        assert match is not None
-        start, end, similarity = match
+        if not first_by_stem:
+            raise ValueError(
+                "No repeated four-bar motif passed the onset and pitch-class-span thresholds."
+            )
+        match = max(first_by_stem.values(), key=lambda row: float(row["similarity"]))
+        name = str(match["stem_name"])
+        start = round(float(match["start_sec"]) * sample_rate)
+        end = round(float(match["end_sec"]) * sample_rate)
         return {
             "stem_name": name,
             "stem_scores": scores,
             "start_frame": start,
             "end_frame": end,
-            "start_sec": start / sample_rate,
-            "end_sec": end / sample_rate,
-            "similarity": similarity,
-            "audio": melodic_accompaniment(stems, candidates)[:, start:end],
+            "start_sec": float(match["start_sec"]),
+            "end_sec": float(match["end_sec"]),
+            "similarity": float(match["similarity"]),
+            "audio": result["melodic_accompaniment"][:, start:end],
         }
 
     def score_all(
@@ -309,6 +354,7 @@ class MotifExtractor:
             raise ValueError("No configured motif candidate stems were produced by the separator.")
         _, downbeats = self.beat_tracker(str(audio_path))
         downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
+        melodic = melodic_accompaniment(stems, candidates)
         rows: list[dict[str, float | int | str]] = []
         for name in candidates:
             matches = score_repeating_motifs(stems[name], sample_rate, downbeats, self.config)
@@ -330,11 +376,14 @@ class MotifExtractor:
                         "onset_similarity": onset_similarity,
                         "chroma_similarity": chroma_similarity,
                         "similarity": float(similarity),
+                        "pitch_class_span": pitch_class_span(
+                            melodic[:, start:end], sample_rate
+                        ),
                     }
                 )
         return {
             "candidates": rows,
-            "melodic_accompaniment": melodic_accompaniment(stems, candidates),
+            "melodic_accompaniment": melodic,
             "sample_rate": sample_rate,
         }
 
