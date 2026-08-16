@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 class StemSeparator:
@@ -27,12 +27,8 @@ class StemSeparator:
     def sample_rate(self) -> int:
         return int(self.model.samplerate)
 
-    def separate(self, audio_path: str | Path) -> tuple[dict[str, Any], int, Any]:
-        """Return stem tensors, sample rate, and the resampled stereo mixture."""
-
-        import torch
+    def _load_audio(self, audio_path: str | Path) -> Any:
         import torchaudio
-        from demucs.apply import apply_model
 
         wav, sample_rate = torchaudio.load(str(audio_path))
         if wav.shape[0] == 1:
@@ -41,11 +37,44 @@ class StemSeparator:
             wav = wav[:2]
         if sample_rate != self.sample_rate:
             wav = torchaudio.functional.resample(wav, sample_rate, self.sample_rate)
+        return wav.cpu()
+
+    def separate(self, audio_path: str | Path) -> tuple[dict[str, Any], int, Any]:
+        """Return stem tensors, sample rate, and the resampled stereo mixture."""
+
+        return self.separate_many([audio_path])[0]
+
+    def separate_many(
+        self,
+        audio_paths: Iterable[str | Path],
+    ) -> list[tuple[dict[str, Any], int, Any]]:
+        """Separate multiple tracks in one padded GPU batch and preserve input order."""
+
+        import torch
+        from demucs.apply import apply_model
+
+        paths = list(audio_paths)
+        if not paths:
+            return []
+        mixtures = [self._load_audio(path) for path in paths]
+        lengths = [wav.shape[-1] for wav in mixtures]
+        max_length = max(lengths)
+        batch = torch.stack(
+            [
+                torch.nn.functional.pad(wav, (0, max_length - length))
+                for wav, length in zip(mixtures, lengths)
+            ]
+        )
 
         with torch.inference_mode():
-            sources = apply_model(self.model, wav.to(self.device)[None], device=self.device)[0]
-        stems = {name: sources[index].cpu() for index, name in enumerate(self.model.sources)}
-        return stems, self.sample_rate, wav.cpu()
+            batch_sources = apply_model(self.model, batch.to(self.device), device=self.device)
+
+        results = []
+        for song_index, (mixture, length) in enumerate(zip(mixtures, lengths)):
+            sources = batch_sources[song_index, :, :, :length].cpu()
+            stems = {name: sources[index] for index, name in enumerate(self.model.sources)}
+            results.append((stems, self.sample_rate, mixture))
+        return results
 
 
 def save_audio(path: str | Path, audio: Any, sample_rate: int, *, audio_format: str = "flac") -> Path:

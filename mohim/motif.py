@@ -21,7 +21,7 @@ class MotifConfig:
     min_presence: float = 0.80
     max_similarity_difference: float = 0.40
     onset_threshold: float = 0.60
-    pitch_class_span_threshold: float = 0.30
+    pitch_class_span_threshold: float = 0.25
     min_stem_score: float = 0.25
 
 
@@ -176,7 +176,7 @@ def find_repeating_motif(
         span = pitch_class_span(feature_audio[:, start:end], sample_rate)
         if (
             onset_similarity >= config.onset_threshold
-            and span > config.pitch_class_span_threshold
+            and span >= config.pitch_class_span_threshold
         ):
             return start, end, similarity
     return None
@@ -282,16 +282,28 @@ class MotifExtractor:
         self.beat_tracker = beat_tracker
         self.config = config or MotifConfig()
 
-    def extract(self, audio_path: str | Path, stems: dict[str, Any], full_wav: Any, sample_rate: int) -> dict[str, Any]:
+    def extract(
+        self,
+        audio_path: str | Path,
+        stems: dict[str, Any],
+        full_wav: Any,
+        sample_rate: int,
+        *,
+        scored_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return the strongest first onset-and-pitch-passing motif across stems."""
         del full_wav  # Kept in the public API for DatasetBuilder compatibility.
-        result = self.score_all(audio_path, stems, sample_rate)
+        result = (
+            scored_result
+            if scored_result is not None
+            else self.score_all(audio_path, stems, sample_rate)
+        )
         candidates = [name for name in self.config.candidate_stems if name in stems]
         eligible = [
             row
             for row in result["candidates"]
             if row["onset_similarity"] >= self.config.onset_threshold
-            and row["pitch_class_span"] > self.config.pitch_class_span_threshold
+            and row["pitch_class_span"] >= self.config.pitch_class_span_threshold
         ]
         first_by_stem: dict[str, dict[str, float | int | str]] = {}
         for row in sorted(eligible, key=lambda item: float(item["start_sec"])):

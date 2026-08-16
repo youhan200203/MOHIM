@@ -109,7 +109,14 @@ class DatasetBuilder:
             return BuildResult(track.track_id, "skipped", "already_processed", str(sample_dir), metadata.get("motif_stem"))
         return None
 
-    def process_track(self, track: LocalTrack, audio_index: dict[str, Path]) -> BuildResult:
+    def process_track(
+        self,
+        track: LocalTrack,
+        audio_index: dict[str, Path],
+        *,
+        separation_result: tuple[dict[str, Any], int, Any] | None = None,
+        motif_scores: dict[str, Any] | None = None,
+    ) -> BuildResult:
         sample_dir = self.output_dir / _track_directory_name(track)
         cached = self._accepted_result(track, sample_dir)
         if cached:
@@ -122,10 +129,22 @@ class DatasetBuilder:
             return BuildResult(track.track_id, "rejected", "lyrics_missing", None, None)
 
         try:
-            stems, sample_rate, mixture = self.separator.separate(audio_path)
+            if separation_result is None:
+                stems, sample_rate, mixture = self.separator.separate(audio_path)
+            else:
+                stems, sample_rate, mixture = separation_result
             if "vocals" not in stems:
                 raise ValueError("Separator did not return a vocals stem.")
-            motif = self.motif_extractor.extract(audio_path, stems, mixture, sample_rate)
+            if motif_scores is None:
+                motif = self.motif_extractor.extract(audio_path, stems, mixture, sample_rate)
+            else:
+                motif = self.motif_extractor.extract(
+                    audio_path,
+                    stems,
+                    mixture,
+                    sample_rate,
+                    scored_result=motif_scores,
+                )
             motif_audio, accompaniment, scaled_stems, target_gain = _apply_common_headroom(
                 motif["audio"], stems
             )

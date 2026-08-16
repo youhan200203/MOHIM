@@ -113,7 +113,7 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(repetition_score([60, 62]), 0.0)
 
     @patch.object(MotifExtractor, "score_all")
-    def test_extract_compares_first_onset_and_pitch_passing_motif_from_each_stem(self, score_all):
+    def test_extract_reuses_scores_and_compares_first_passing_motifs(self, score_all):
         guitar = _FakeStem(0.8)
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
@@ -142,9 +142,15 @@ class MotifScoreTests(unittest.TestCase):
         }
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
-        result = extractor.extract("song.wav", stems, None, 100)
+        result = extractor.extract(
+            "song.wav",
+            stems,
+            None,
+            100,
+            scored_result=score_all.return_value,
+        )
 
-        score_all.assert_called_once_with("song.wav", stems, 100)
+        score_all.assert_not_called()
         self.assertEqual(result["stem_name"], "piano")
         self.assertAlmostEqual(result["stem_scores"]["guitar"]["start_sec"], 2.0)
         self.assertAlmostEqual(result["stem_scores"]["piano"]["similarity"], 0.819)
@@ -168,7 +174,7 @@ class MotifScoreTests(unittest.TestCase):
                     "stem_name": "piano", "start_sec": 2.0, "end_sec": 6.0,
                     "active_ratio": 0.9, "onset_similarity": 0.60,
                     "chroma_similarity": 0.8, "similarity": 0.74,
-                    "pitch_class_span": 0.30,
+                    "pitch_class_span": 0.16666666666666666,
                 },
             ],
             "melodic_accompaniment": _FakeStem(1.0),
@@ -207,7 +213,7 @@ class MotifScoreTests(unittest.TestCase):
         self.assertNotIn("total", result["candidates"][0])
         self.assertAlmostEqual(result["melodic_accompaniment"].rms, 1.0)
 
-    @patch("mohim.motif.pitch_class_span", side_effect=[0.8, 0.30, 0.31])
+    @patch("mohim.motif.pitch_class_span", side_effect=[0.8, 0.25])
     @patch("mohim.motif.score_repeating_motifs")
     def test_find_repeating_motif_uses_onset_and_pitch_thresholds(self, score_motifs, _span):
         score_motifs.return_value = [
@@ -220,7 +226,7 @@ class MotifScoreTests(unittest.TestCase):
             _FakeStem(1.0), 100, [0, 1, 2], MotifConfig()
         )
 
-        self.assertEqual(result, (300, 700, 0.320))
+        self.assertEqual(result, (200, 600, 0.740))
 
     def test_repeating_motifs_filter_by_absolute_active_ratio_and_report_components(self):
         librosa = types.ModuleType("librosa")
