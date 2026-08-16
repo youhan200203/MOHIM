@@ -18,7 +18,7 @@ class MotifConfig:
     bars: int = 4
     search_seconds: float = 30.0
     silence_db: float = -40.0
-    min_presence: float = 0.80
+    min_presence: float = 0.70
     max_similarity_difference: float = 0.40
     onset_threshold: float = 0.60
     pitch_class_span_threshold: float = 0.25

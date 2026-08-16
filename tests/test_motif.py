@@ -279,11 +279,11 @@ class MotifScoreTests(unittest.TestCase):
                 downbeats=[0.0, 2.0, 4.0, 6.0],
                 config=MotifConfig(bars=1),
             )
-            lower_presence_threshold = score_repeating_motifs(
+            stricter_presence_threshold = score_repeating_motifs(
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
-                config=MotifConfig(bars=1, min_presence=0.70),
+                config=MotifConfig(bars=1, min_presence=0.80),
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
@@ -293,7 +293,7 @@ class MotifScoreTests(unittest.TestCase):
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
-                config=MotifConfig(bars=1),
+                config=MotifConfig(bars=1, min_presence=0.80),
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
@@ -303,7 +303,7 @@ class MotifScoreTests(unittest.TestCase):
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
-                config=MotifConfig(bars=1),
+                config=MotifConfig(bars=1, min_presence=0.80),
             )
 
             pairwise.cosine_similarity = lambda first, _second: np.array(
@@ -313,19 +313,23 @@ class MotifScoreTests(unittest.TestCase):
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
-                config=MotifConfig(bars=1),
+                config=MotifConfig(bars=1, min_presence=0.80),
             )
             wider_difference_threshold = score_repeating_motifs(
                 stem,
                 sample_rate=100,
                 downbeats=[0.0, 2.0, 4.0, 6.0],
-                config=MotifConfig(bars=1, max_similarity_difference=0.42),
+                config=MotifConfig(
+                    bars=1,
+                    min_presence=0.80,
+                    max_similarity_difference=0.42,
+                ),
             )
 
-        self.assertEqual(len(result), 3)
-        self.assertEqual(len(lower_presence_threshold), 4)
-        self.assertEqual([row[0] for row in result], [200, 400, 600])
-        self.assertEqual([row[5] for row in result], [0.8, 1.0, 1.0])
+        self.assertEqual(len(result), 4)
+        self.assertEqual(len(stricter_presence_threshold), 3)
+        self.assertEqual([row[0] for row in result], [0, 200, 400, 600])
+        self.assertEqual([row[5] for row in result], [0.7, 0.8, 1.0, 1.0])
         for _, _, onset_similarity, chroma_similarity, similarity, _ in result:
             self.assertAlmostEqual(onset_similarity, 0.6)
             self.assertAlmostEqual(chroma_similarity, 0.8)
