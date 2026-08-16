@@ -412,7 +412,7 @@ index 0000000..72660f8
 +        if id(current) in visited:
 +            continue
 +        visited.add(id(current))
-+        if hasattr(current, "proj_in"):
++        if "proj_in" in current._modules:
 +            return current
 +        for attr in ("_forward_module", "_orig_mod", "base_model", "model", "module"):
 +            child = getattr(current, attr, None)
@@ -643,7 +643,7 @@ new file mode 100644
 index 0000000..f35a86e
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_test.py
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,125 @@
 +"""Unit tests for the cover-style dual-stream adapter."""
 +
 +import tempfile
@@ -659,7 +659,28 @@ index 0000000..f35a86e
 +    VOCAL_ROLE,
 +    DualStreamConditioner,
 +    DualStreamInputProjection,
++    attach_dual_stream_conditioner,
 +)
++
++
++class _DecoderCore(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.proj_in = nn.Linear(6, 4, bias=False)
++
++
++class _ForwardingWrapper(nn.Module):
++    """Approximate PEFT's forwarded attribute lookup around the real decoder."""
++
++    def __init__(self, base_model):
++        super().__init__()
++        self.base_model = base_model
++
++    def __getattr__(self, name):
++        try:
++            return super().__getattr__(name)
++        except AttributeError:
++            return getattr(self.base_model, name)
 +
 +
 +class DualStreamConditionerTests(unittest.TestCase):
@@ -688,6 +709,25 @@ index 0000000..f35a86e
 +        self.assertIsNotNone(conditioner.motif_projection.weight.grad)
 +        optimizer.step()
 +        self.assertGreater(float(conditioner.motif_projection.weight.abs().sum()), 0.0)
++
++    def test_attachment_replaces_projection_owned_by_forwarded_decoder(self):
++        core = _DecoderCore()
++        wrapper = _ForwardingWrapper(core)
++        combined = torch.randn(2, 5, 8)
++        base_input = torch.cat([combined[..., :4], combined[..., 6:]], dim=-1)
++        expected = core.proj_in(base_input)
++
++        attach_dual_stream_conditioner(
++            wrapper,
++            latent_dim=2,
++            condition_dim=4,
++            hidden_dim=4,
++            patch_size=1,
++        )
++
++        self.assertNotIn("proj_in", wrapper._modules)
++        self.assertIsInstance(core.proj_in, DualStreamInputProjection)
++        self.assertTrue(torch.equal(core.proj_in(combined), expected))
 +
 +    def test_condition_contains_role_and_text_only(self):
 +        _, conditioner, _ = self._modules()
