@@ -84,6 +84,7 @@ class DatasetBuilderTests(unittest.TestCase):
                         "status": "accepted",
                         "track_id": "shape-of-you-id",
                         "motif_stem": "other",
+                        "motif_onset_variation": 0.3,
                         "motif_seed_file": "motif.flac",
                         "accompaniment_target_file": "accompaniment.flac",
                         "vocal_target_file": "vocals.flac",
@@ -117,6 +118,7 @@ class DatasetBuilderTests(unittest.TestCase):
                 "stem_name": "other",
                 "stem_scores": {},
                 "similarity": 0.7,
+                "onset_variation": 0.3,
                 "start_sec": 1.0,
                 "end_sec": 5.0,
             }

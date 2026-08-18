@@ -103,6 +103,7 @@ class DatasetBuilder:
             and all(required_names)
             and isinstance(stem_files, dict)
             and stem_files.get("vocals") == metadata.get("vocal_target_file")
+            and isinstance(metadata.get("motif_onset_variation"), (int, float))
             and "drums" not in stem_files
             and all(path.is_file() for path in required)
         ):
@@ -200,6 +201,7 @@ class DatasetBuilder:
             "motif_stem": motif["stem_name"],
             "motif_scores": motif["stem_scores"],
             "motif_similarity": motif["similarity"],
+            "motif_onset_variation": motif["onset_variation"],
             "motif_start_sec": motif["start_sec"],
             "motif_end_sec": motif["end_sec"],
             "motif_seed_file": motif_seed_name,
