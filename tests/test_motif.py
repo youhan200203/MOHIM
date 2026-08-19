@@ -9,6 +9,7 @@ from mohim.motif import (
     MotifConfig,
     MotifExtractor,
     _max_shifted_cosine_similarity,
+    _pairwise_shifted_cosine_similarity,
     find_repeating_motif,
     melodic_accompaniment,
     movement_score,
@@ -115,6 +116,55 @@ class MotifScoreTests(unittest.TestCase):
             mean_center=False,
         )
         self.assertLess(raw_similarity, 1.0)
+
+    def test_pairwise_shifted_cosine_matches_scalar_reference(self):
+        rng = np.random.default_rng(42)
+        first = rng.normal(size=(5, 256))
+        second = rng.normal(size=(9, 256))
+        first[0] = 1.0
+        second[0] = 1.0
+
+        def cosine_similarity(left, right):
+            left_norm = np.linalg.norm(left, axis=1, keepdims=True)
+            right_norm = np.linalg.norm(right, axis=1, keepdims=True)
+            normalized_left = np.divide(
+                left,
+                left_norm,
+                out=np.zeros_like(left),
+                where=left_norm != 0,
+            )
+            normalized_right = np.divide(
+                right,
+                right_norm,
+                out=np.zeros_like(right),
+                where=right_norm != 0,
+            )
+            return normalized_left @ normalized_right.T
+
+        for mean_center in (False, True):
+            actual = _pairwise_shifted_cosine_similarity(
+                first,
+                second,
+                max_shift=3,
+                cosine_similarity=cosine_similarity,
+                mean_center=mean_center,
+            )
+            expected = np.asarray(
+                [
+                    [
+                        _max_shifted_cosine_similarity(
+                            left,
+                            right,
+                            max_shift=3,
+                            cosine_similarity=cosine_similarity,
+                            mean_center=mean_center,
+                        )
+                        for right in second
+                    ]
+                    for left in first
+                ]
+            )
+            np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-15)
 
     def test_melodic_accompaniment_excludes_drums_and_vocals(self):
         stems = {
@@ -321,7 +371,7 @@ class MotifScoreTests(unittest.TestCase):
 
         variation.assert_not_called()
 
-    @patch("mohim.motif.pitch_class_span", side_effect=[0.25, 0.5, 0.75])
+    @patch("mohim.motif.pitch_class_span", return_value=0.5)
     @patch("mohim.motif.score_repeating_motifs")
     def test_score_all_keeps_every_filtered_candidate(self, score_motifs, span):
         guitar = _FakeStem(0.8)
@@ -344,12 +394,53 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual([row["similarity"] for row in result["candidates"]], [0.14, 0.67, 0.37])
         self.assertEqual(
             [row["pitch_class_span"] for row in result["candidates"]],
-            [0.25, 0.5, 0.75],
+            [None, 0.5, None],
         )
-        self.assertEqual(span.call_count, 3)
+        self.assertEqual(span.call_count, 1)
         self.assertNotIn("dominance", result["candidates"][0])
         self.assertNotIn("total", result["candidates"][0])
         self.assertAlmostEqual(result["melodic_accompaniment"].rms, 1.0)
+
+    @patch("mohim.motif._score_stem_candidates")
+    def test_score_many_preserves_track_and_stem_order(self, score_stem):
+        score_stem.side_effect = lambda name, *_args: [{"stem_name": name}]
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+        tracks = [
+            ("first.wav", {"guitar": _FakeStem(0.8), "bass": _FakeStem(0.2)}, 100),
+            ("second.wav", {"piano": _FakeStem(0.6), "other": _FakeStem(0.4)}, 200),
+        ]
+
+        results = extractor.score_many(tracks, max_workers=12)
+
+        self.assertEqual(
+            [[row["stem_name"] for row in result["candidates"]] for result in results],
+            [["guitar", "bass"], ["piano", "other"]],
+        )
+        self.assertEqual([result["sample_rate"] for result in results], [100, 200])
+        self.assertEqual(score_stem.call_count, 4)
+
+    @patch("mohim.motif.pitch_class_span", return_value=0.5)
+    @patch("mohim.motif.score_repeating_motifs")
+    def test_score_many_matches_sequential_scores(self, score_motifs, _span):
+        score_motifs.side_effect = lambda stem, *_args: [
+            (100, 500, 0.61, 0.70, 0.40, 0.50, stem.rms, 0.9)
+        ]
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+        tracks = [
+            ("first.wav", {"guitar": _FakeStem(0.8), "bass": _FakeStem(0.2)}, 100),
+            ("second.wav", {"piano": _FakeStem(0.6), "other": _FakeStem(0.4)}, 200),
+        ]
+        sequential = [
+            extractor.score_all(audio_path, stems, sample_rate)
+            for audio_path, stems, sample_rate in tracks
+        ]
+
+        parallel = extractor.score_many(tracks, max_workers=12)
+
+        self.assertEqual(
+            [result["candidates"] for result in parallel],
+            [result["candidates"] for result in sequential],
+        )
 
     @patch("mohim.motif.pitch_class_span", side_effect=[0.8, 0.25])
     @patch("mohim.motif.score_repeating_motifs")
@@ -399,7 +490,8 @@ class MotifScoreTests(unittest.TestCase):
             cosine_shapes.append((first.shape[1], second.shape[1]))
             if first.shape[1] == 768:
                 chroma_cosine_inputs.append((first.copy(), second.copy()))
-            return np.array([[0.6 if first.shape[1] <= 256 else 0.8]])
+            value = 0.6 if first.shape[1] <= 256 else 0.8
+            return np.full((first.shape[0], second.shape[0]), value)
 
         pairwise.cosine_similarity = cosine_similarity
         stem_values = np.arange(800, dtype=np.float64)
@@ -427,8 +519,9 @@ class MotifScoreTests(unittest.TestCase):
                 config=MotifConfig(bars=1, min_presence=0.80),
             )
 
-            pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.5 if first.shape[1] <= 256 else 0.8]]
+            pairwise.cosine_similarity = lambda first, second: np.full(
+                (first.shape[0], second.shape[0]),
+                0.5 if first.shape[1] <= 256 else 0.8,
             )
             difference_below_threshold = score_repeating_motifs(
                 stem,
@@ -437,8 +530,9 @@ class MotifScoreTests(unittest.TestCase):
                 config=MotifConfig(bars=1, min_presence=0.80),
             )
 
-            pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.4 if first.shape[1] <= 256 else 0.8]]
+            pairwise.cosine_similarity = lambda first, second: np.full(
+                (first.shape[0], second.shape[0]),
+                0.4 if first.shape[1] <= 256 else 0.8,
             )
             difference_at_threshold = score_repeating_motifs(
                 stem,
@@ -447,8 +541,9 @@ class MotifScoreTests(unittest.TestCase):
                 config=MotifConfig(bars=1, min_presence=0.80),
             )
 
-            pairwise.cosine_similarity = lambda first, _second: np.array(
-                [[0.39 if first.shape[1] <= 256 else 0.8]]
+            pairwise.cosine_similarity = lambda first, second: np.full(
+                (first.shape[0], second.shape[0]),
+                0.39 if first.shape[1] <= 256 else 0.8,
             )
             difference_above_threshold = score_repeating_motifs(
                 stem,
@@ -495,8 +590,8 @@ class MotifScoreTests(unittest.TestCase):
         self.assertTrue(chroma_cosine_inputs)
         chroma_means = [
             (
-                first.reshape(12, 64).mean(axis=0),
-                second.reshape(12, 64).mean(axis=0),
+                first.reshape(-1, 12, 64).mean(axis=1),
+                second.reshape(-1, 12, 64).mean(axis=1),
             )
             for first, second in chroma_cosine_inputs
         ]

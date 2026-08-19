@@ -146,6 +146,34 @@ def _max_shifted_cosine_similarity(
     return max(scores)
 
 
+def _pairwise_shifted_cosine_similarity(
+    first: np.ndarray,
+    second: np.ndarray,
+    max_shift: int,
+    cosine_similarity: Any,
+    *,
+    mean_center: bool = True,
+) -> np.ndarray:
+    """Return every shifted cosine pair while batching each shift."""
+
+    scores = []
+    for shift in range(-max_shift, max_shift + 1):
+        if shift < 0:
+            first_overlap = first[:, -shift:]
+            second_overlap = second[:, :shift]
+        elif shift > 0:
+            first_overlap = first[:, :-shift]
+            second_overlap = second[:, shift:]
+        else:
+            first_overlap = first
+            second_overlap = second
+        if mean_center:
+            first_overlap = first_overlap - np.mean(first_overlap, axis=1, keepdims=True)
+            second_overlap = second_overlap - np.mean(second_overlap, axis=1, keepdims=True)
+        scores.append(cosine_similarity(first_overlap, second_overlap))
+    return np.max(np.stack(scores), axis=0)
+
+
 def pitch_class_span(audio: Any, sample_rate: int, hop_length: int = 512) -> float:
     """Return the fraction of pitch classes active in at least 10% of valid frames."""
     import librosa
@@ -292,63 +320,83 @@ def score_repeating_motifs(
         )
 
     candidates: list[tuple[int, int, float, float, float, float, float, float]] = []
-    for (
+    if not segments:
+        return candidates
+
+    candidate_count = next(
+        (
+            index
+            for index, segment in enumerate(segments)
+            if segment[0] >= config.search_seconds
+        ),
+        len(segments),
+    )
+    if candidate_count == 0:
+        return candidates
+
+    starts = np.asarray([segment[0] for segment in segments], dtype=np.float64)
+    onsets = np.stack([segment[2] for segment in segments])
+    raw_chromas = np.stack([segment[3] for segment in segments])
+    mean_centered_chromas = np.stack([segment[4] for segment in segments])
+    candidate_onsets = onsets[:candidate_count]
+    raw_onset_similarities = _pairwise_shifted_cosine_similarity(
+        candidate_onsets,
+        onsets,
+        max_shift=3,
+        cosine_similarity=cosine_similarity,
+        mean_center=False,
+    )
+    mean_centered_onset_similarities = _pairwise_shifted_cosine_similarity(
+        candidate_onsets,
+        onsets,
+        max_shift=3,
+        cosine_similarity=cosine_similarity,
+        mean_center=True,
+    )
+    raw_chroma_similarities = cosine_similarity(
+        raw_chromas[:candidate_count], raw_chromas
+    )
+    mean_centered_chroma_similarities = cosine_similarity(
+        mean_centered_chromas[:candidate_count], mean_centered_chromas
+    )
+    comparison_mask = (
+        np.abs(starts[:candidate_count, None] - starts[None, :])
+        >= motif_length * 0.9
+    )
+
+    for candidate_index, (
         start_sec,
         end_sec,
-        first_onset,
-        first_raw_chroma,
-        first_mean_centered_chroma,
+        _,
+        _,
+        _,
         active_ratio,
-    ) in segments:
-        if start_sec >= config.search_seconds:
-            break
-        raw_onset_scores: list[float] = []
-        raw_chroma_scores: list[float] = []
-        mean_centered_onset_scores: list[float] = []
-        mean_centered_chroma_scores: list[float] = []
-        for (
-            other_start,
-            _,
-            other_onset,
-            other_raw_chroma,
-            other_mean_centered_chroma,
-            _,
-        ) in segments:
-            if abs(other_start - start_sec) < motif_length * 0.9:
-                continue
-            raw_onset_similarity = _max_shifted_cosine_similarity(
-                first_onset,
-                other_onset,
-                max_shift=3,
-                cosine_similarity=cosine_similarity,
-                mean_center=False,
-            )
-            mean_centered_onset_similarity = _max_shifted_cosine_similarity(
-                first_onset,
-                other_onset,
-                max_shift=3,
-                cosine_similarity=cosine_similarity,
-                mean_center=True,
-            )
-            raw_chroma_similarity = cosine_similarity(
-                first_raw_chroma[None], other_raw_chroma[None]
-            )[0, 0]
-            mean_centered_chroma_similarity = cosine_similarity(
-                first_mean_centered_chroma[None],
-                other_mean_centered_chroma[None],
-            )[0, 0]
-            raw_onset_scores.append(float(raw_onset_similarity))
-            raw_chroma_scores.append(float(raw_chroma_similarity))
-            mean_centered_onset_scores.append(float(mean_centered_onset_similarity))
-            mean_centered_chroma_scores.append(float(mean_centered_chroma_similarity))
-        if not raw_onset_scores:
+    ) in enumerate(segments[:candidate_count]):
+        valid_comparisons = comparison_mask[candidate_index]
+        if not np.any(valid_comparisons):
             continue
-        onset_similarity = float(np.mean(raw_onset_scores))
-        chroma_similarity = float(np.mean(raw_chroma_scores))
+        onset_similarity = float(
+            np.mean(raw_onset_similarities[candidate_index, valid_comparisons])
+        )
+        chroma_similarity = float(
+            np.mean(raw_chroma_similarities[candidate_index, valid_comparisons])
+        )
         if abs(onset_similarity - chroma_similarity) > config.max_similarity_difference:
             continue
-        mean_centered_onset_similarity = float(np.mean(mean_centered_onset_scores))
-        mean_centered_chroma_similarity = float(np.mean(mean_centered_chroma_scores))
+        mean_centered_onset_similarity = float(
+            np.mean(
+                mean_centered_onset_similarities[
+                    candidate_index, valid_comparisons
+                ]
+            )
+        )
+        mean_centered_chroma_similarity = float(
+            np.mean(
+                mean_centered_chroma_similarities[
+                    candidate_index, valid_comparisons
+                ]
+            )
+        )
         similarity = (
             0.7 * mean_centered_onset_similarity
             + 0.3 * mean_centered_chroma_similarity
@@ -377,6 +425,47 @@ def melodic_accompaniment(stems: dict[str, Any], candidate_stems: Iterable[str])
     if any(stem.shape != reference_shape for stem in selected):
         raise ValueError("Motif candidate stems are not time-aligned.")
     return sum(selected[1:], selected[0].clone())
+
+
+def _score_stem_candidates(
+    stem_name: str,
+    stem_audio: Any,
+    melodic: Any,
+    sample_rate: int,
+    downbeats: tuple[float, ...],
+    config: MotifConfig,
+) -> list[dict[str, Any]]:
+    rows = []
+    matches = score_repeating_motifs(stem_audio, sample_rate, downbeats, config)
+    for candidate_index, (
+        start,
+        end,
+        onset_similarity,
+        chroma_similarity,
+        mean_centered_onset_similarity,
+        mean_centered_chroma_similarity,
+        similarity,
+        active_ratio,
+    ) in enumerate(matches):
+        span = None
+        if onset_similarity >= config.onset_threshold:
+            span = pitch_class_span(melodic[:, start:end], sample_rate)
+        rows.append(
+            {
+                "stem_name": stem_name,
+                "candidate_index": candidate_index,
+                "start_sec": start / sample_rate,
+                "end_sec": end / sample_rate,
+                "active_ratio": active_ratio,
+                "onset_similarity": onset_similarity,
+                "chroma_similarity": chroma_similarity,
+                "mean_centered_onset_similarity": mean_centered_onset_similarity,
+                "mean_centered_chroma_similarity": mean_centered_chroma_similarity,
+                "similarity": float(similarity),
+                "pitch_class_span": span,
+            }
+        )
+    return rows
 
 
 class MotifExtractor:
@@ -503,41 +592,91 @@ class MotifExtractor:
         _, downbeats = self.beat_tracker(str(audio_path))
         downbeats = tuple(np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist())
         melodic = melodic_accompaniment(stems, candidates)
-        rows: list[dict[str, float | int | str]] = []
+        rows: list[dict[str, Any]] = []
         for name in candidates:
-            matches = score_repeating_motifs(stems[name], sample_rate, downbeats, self.config)
-            for candidate_index, (
-                start,
-                end,
-                onset_similarity,
-                chroma_similarity,
-                mean_centered_onset_similarity,
-                mean_centered_chroma_similarity,
-                similarity,
-                active_ratio,
-            ) in enumerate(matches):
-                rows.append(
-                    {
-                        "stem_name": name,
-                        "candidate_index": candidate_index,
-                        "start_sec": start / sample_rate,
-                        "end_sec": end / sample_rate,
-                        "active_ratio": active_ratio,
-                        "onset_similarity": onset_similarity,
-                        "chroma_similarity": chroma_similarity,
-                        "mean_centered_onset_similarity": mean_centered_onset_similarity,
-                        "mean_centered_chroma_similarity": mean_centered_chroma_similarity,
-                        "similarity": float(similarity),
-                        "pitch_class_span": pitch_class_span(
-                            melodic[:, start:end], sample_rate
-                        ),
-                    }
+            rows.extend(
+                _score_stem_candidates(
+                    name,
+                    stems[name],
+                    melodic,
+                    sample_rate,
+                    downbeats,
+                    self.config,
                 )
+            )
         return {
             "candidates": rows,
             "melodic_accompaniment": melodic,
             "sample_rate": sample_rate,
         }
+
+    def score_many(
+        self,
+        tracks: Iterable[tuple[str | Path, dict[str, Any], int]],
+        *,
+        max_workers: int,
+    ) -> list[dict[str, Any]]:
+        """Score song-stem jobs concurrently while keeping GPU beat tracking serial."""
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1.")
+        prepared = []
+        for audio_path, stems, sample_rate in tracks:
+            candidates = [
+                name for name in self.config.candidate_stems if name in stems
+            ]
+            if not candidates:
+                raise ValueError(
+                    "No configured motif candidate stems were produced by the separator."
+                )
+            _, downbeats = self.beat_tracker(str(audio_path))
+            normalized_downbeats = tuple(
+                np.asarray(downbeats, dtype=np.float64).reshape(-1).tolist()
+            )
+            prepared.append(
+                (
+                    candidates,
+                    stems,
+                    sample_rate,
+                    normalized_downbeats,
+                    melodic_accompaniment(stems, candidates),
+                )
+            )
+
+        rows_by_track: list[list[dict[str, Any]]] = [[] for _ in prepared]
+        submitted = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for track_index, (
+                candidates,
+                stems,
+                sample_rate,
+                downbeats,
+                melodic,
+            ) in enumerate(prepared):
+                for name in candidates:
+                    future = executor.submit(
+                        _score_stem_candidates,
+                        name,
+                        stems[name],
+                        melodic,
+                        sample_rate,
+                        downbeats,
+                        self.config,
+                    )
+                    submitted.append((track_index, future))
+            for track_index, future in submitted:
+                rows_by_track[track_index].extend(future.result())
+
+        return [
+            {
+                "candidates": rows_by_track[track_index],
+                "melodic_accompaniment": melodic,
+                "sample_rate": sample_rate,
+            }
+            for track_index, (_, _, sample_rate, _, melodic) in enumerate(prepared)
+        ]
 
 
 def create_beat_tracker(checkpoint_path: str | Path, device: str = "cuda") -> Any:
