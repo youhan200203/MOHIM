@@ -328,6 +328,7 @@ class MotifExtractor:
         sample_rate: int,
         *,
         scored_result: dict[str, Any] | None = None,
+        validated_onset_variation: float | None = None,
     ) -> dict[str, Any]:
         """Return the strongest first onset-and-pitch-passing motif across stems."""
         del full_wav  # Kept in the public API for DatasetBuilder compatibility.
@@ -382,7 +383,11 @@ class MotifExtractor:
         start = round(float(match["start_sec"]) * sample_rate)
         end = round(float(match["end_sec"]) * sample_rate)
         motif_audio = result["melodic_accompaniment"][:, start:end]
-        variation = onset_variation(motif_audio, sample_rate)
+        variation = (
+            onset_variation(motif_audio, sample_rate)
+            if validated_onset_variation is None
+            else float(validated_onset_variation)
+        )
         if variation < self.config.onset_variation_threshold:
             raise ValueError(
                 "Selected motif onset variation "

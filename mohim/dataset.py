@@ -184,7 +184,13 @@ class DatasetBuilder:
             )
         return BuildResult(track.track_id, "rejected", reason, None, None)
 
-    def _accepted_result(self, track: LocalTrack, sample_dir: Path) -> BuildResult | None:
+    def _accepted_result(
+        self,
+        track: LocalTrack,
+        sample_dir: Path,
+        *,
+        validated_onset_variation: float | None = None,
+    ) -> BuildResult | None:
         metadata_path = sample_dir / "metadata.json"
         if not self.resume or not metadata_path.is_file():
             return None
@@ -201,18 +207,37 @@ class DatasetBuilder:
         debug_stem_names = tuple(stem_files.values()) if isinstance(stem_files, dict) else ()
         required = [sample_dir / name for name in (*required_names, *debug_stem_names) if name]
         required.append(sample_dir / "lyrics.txt")
+        stored_onset_variation = metadata.get("motif_onset_variation")
+        onset_variation_threshold = float(
+            getattr(
+                getattr(self.motif_extractor, "config", None),
+                "onset_variation_threshold",
+                0.20,
+            )
+        )
         if (
             metadata.get("schema_version") == 4
             and metadata.get("status") == "accepted"
             and all(required_names)
             and isinstance(stem_files, dict)
             and stem_files.get("vocals") == metadata.get("vocal_target_file")
-            and isinstance(metadata.get("motif_onset_variation"), (int, float))
+            and isinstance(stored_onset_variation, (int, float))
+            and float(stored_onset_variation) >= onset_variation_threshold
+            and (
+                validated_onset_variation is None
+                or float(stored_onset_variation) == float(validated_onset_variation)
+            )
             and "drums" not in stem_files
             and all(path.is_file() for path in required)
         ):
             return BuildResult(track.track_id, "skipped", "already_processed", str(sample_dir), metadata.get("motif_stem"))
         return None
+
+    def record_rejection(self, track: LocalTrack, reason: str) -> BuildResult:
+        """Record a rejection decided by the canonical final-motif validation."""
+
+        sample_dir = self.output_dir / _track_directory_name(track)
+        return self._rejected_result(track, sample_dir, reason)
 
     def process_track(
         self,
@@ -221,9 +246,14 @@ class DatasetBuilder:
         *,
         separation_result: tuple[dict[str, Any], int, Any] | None = None,
         motif_scores: dict[str, Any] | None = None,
+        validated_onset_variation: float | None = None,
     ) -> BuildResult:
         sample_dir = self.output_dir / _track_directory_name(track)
-        cached = self._accepted_result(track, sample_dir)
+        cached = self._accepted_result(
+            track,
+            sample_dir,
+            validated_onset_variation=validated_onset_variation,
+        )
         if cached:
             return cached
 
@@ -241,7 +271,13 @@ class DatasetBuilder:
             if "vocals" not in stems:
                 raise ValueError("Separator did not return a vocals stem.")
             if motif_scores is None:
-                motif = self.motif_extractor.extract(audio_path, stems, mixture, sample_rate)
+                motif = self.motif_extractor.extract(
+                    audio_path,
+                    stems,
+                    mixture,
+                    sample_rate,
+                    validated_onset_variation=validated_onset_variation,
+                )
             else:
                 motif = self.motif_extractor.extract(
                     audio_path,
@@ -249,6 +285,7 @@ class DatasetBuilder:
                     mixture,
                     sample_rate,
                     scored_result=motif_scores,
+                    validated_onset_variation=validated_onset_variation,
                 )
             motif_audio, accompaniment, scaled_stems, target_gain = _apply_common_headroom(
                 motif["audio"], stems

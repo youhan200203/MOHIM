@@ -216,6 +216,36 @@ class MotifScoreTests(unittest.TestCase):
 
         variation.assert_called_once()
 
+    @patch("mohim.motif.onset_variation")
+    @patch.object(MotifExtractor, "score_all")
+    def test_extract_uses_validated_final_audio_onset_variation(
+        self, score_all, variation
+    ):
+        stem = _FakeStem(0.8)
+        score_all.return_value = {
+            "candidates": [
+                {
+                    "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
+                    "active_ratio": 0.9, "onset_similarity": 0.60,
+                    "chroma_similarity": 0.8, "similarity": 0.74,
+                    "pitch_class_span": 0.5,
+                },
+            ],
+            "melodic_accompaniment": _FakeStem(1.0),
+        }
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+
+        with self.assertRaisesRegex(ValueError, "onset variation"):
+            extractor.extract(
+                "song.wav",
+                {"guitar": stem},
+                None,
+                100,
+                validated_onset_variation=0.199,
+            )
+
+        variation.assert_not_called()
+
     @patch("mohim.motif.pitch_class_span", side_effect=[0.25, 0.5, 0.75])
     @patch("mohim.motif.score_repeating_motifs")
     def test_score_all_keeps_every_filtered_candidate(self, score_motifs, span):

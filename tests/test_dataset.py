@@ -142,6 +142,7 @@ class DatasetBuilderTests(unittest.TestCase):
                     {"shape-of-you-id": audio_path},
                     separation_result=(stems, 44_100, mixture),
                     motif_scores=motif_scores,
+                    validated_onset_variation=0.2,
                 )
 
         self.assertEqual(result.status, "accepted")
@@ -152,6 +153,76 @@ class DatasetBuilderTests(unittest.TestCase):
             mixture,
             44_100,
             scored_result=motif_scores,
+            validated_onset_variation=0.2,
+        )
+
+    def test_resume_does_not_reuse_onset_variation_below_threshold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sample_dir = root / "Ed Sheeran - Shape of You"
+            sample_dir.mkdir()
+            for filename in (
+                "motif.flac",
+                "accompaniment.flac",
+                "vocals.flac",
+                "other.flac",
+                "lyrics.txt",
+            ):
+                (sample_dir / filename).touch()
+            (sample_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "status": "accepted",
+                        "track_id": "shape-of-you-id",
+                        "motif_stem": "other",
+                        "motif_onset_variation": 0.199,
+                        "motif_seed_file": "motif.flac",
+                        "accompaniment_target_file": "accompaniment.flac",
+                        "vocal_target_file": "vocals.flac",
+                        "stem_files": {"vocals": "vocals.flac", "other": "other.flac"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            builder = DatasetBuilder(
+                audio_dir=root,
+                output_dir=root,
+                separator=object(),
+                motif_extractor=object(),
+            )
+
+            result = builder._accepted_result(_track(), sample_dir)
+
+        self.assertIsNone(result)
+
+    def test_record_rejection_invalidates_cached_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sample_dir = root / "Ed Sheeran - Shape of You"
+            sample_dir.mkdir()
+            metadata_path = sample_dir / "metadata.json"
+            metadata_path.write_text(
+                json.dumps({"schema_version": 4, "status": "accepted"}),
+                encoding="utf-8",
+            )
+            builder = DatasetBuilder(
+                audio_dir=root,
+                output_dir=root,
+                separator=object(),
+                motif_extractor=object(),
+            )
+
+            result = builder.record_rejection(
+                _track(), "final_candidate_onset_variation_below_threshold"
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(metadata["status"], "rejected")
+        self.assertEqual(
+            metadata["rejection_reason"],
+            "final_candidate_onset_variation_below_threshold",
         )
 
     def test_reprocess_rejection_invalidates_previous_accepted_metadata(self):
