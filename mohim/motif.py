@@ -18,10 +18,11 @@ class MotifConfig:
     bars: int = 4
     search_seconds: float = 30.0
     silence_db: float = -40.0
-    min_presence: float = 0.70
+    min_presence: float = 0.65
     max_similarity_difference: float = 0.40
     onset_threshold: float = 0.60
     pitch_class_span_threshold: float = 0.25
+    mean_centered_similarity_threshold: float = 0.28
     onset_variation_threshold: float = 0.20
     min_stem_score: float = 0.25
 
@@ -120,8 +121,10 @@ def _max_shifted_cosine_similarity(
     second: np.ndarray,
     max_shift: int,
     cosine_similarity: Any,
+    *,
+    mean_center: bool = True,
 ) -> float:
-    """Return the best shifted cosine after centering each temporal overlap."""
+    """Return the best raw or mean-centered cosine across temporal shifts."""
 
     scores = []
     for shift in range(-max_shift, max_shift + 1):
@@ -134,10 +137,11 @@ def _max_shifted_cosine_similarity(
         else:
             first_overlap = first
             second_overlap = second
-        first_centered = first_overlap - np.mean(first_overlap)
-        second_centered = second_overlap - np.mean(second_overlap)
+        if mean_center:
+            first_overlap = first_overlap - np.mean(first_overlap)
+            second_overlap = second_overlap - np.mean(second_overlap)
         scores.append(
-            float(cosine_similarity(first_centered[None], second_centered[None])[0, 0])
+            float(cosine_similarity(first_overlap[None], second_overlap[None])[0, 0])
         )
     return max(scores)
 
@@ -214,7 +218,7 @@ def find_repeating_motif(
 ) -> tuple[int, int, float] | None:
     """Return the first candidate that passes onset and pitch-span thresholds."""
     feature_audio = stem_wav if candidate_wav is None else candidate_wav
-    for start, end, onset_similarity, _, similarity, _ in score_repeating_motifs(
+    for start, end, onset_similarity, _, _, _, similarity, _ in score_repeating_motifs(
         stem_wav, sample_rate, downbeats, config
     ):
         span = pitch_class_span(feature_audio[:, start:end], sample_rate)
@@ -231,7 +235,7 @@ def score_repeating_motifs(
     sample_rate: int,
     downbeats: Iterable[float],
     config: MotifConfig,
-) -> list[tuple[int, int, float, float, float, float]]:
+) -> list[tuple[int, int, float, float, float, float, float, float]]:
     """Score every four-bar start downbeat inside the search window."""
     import librosa
     from sklearn.metrics.pairwise import cosine_similarity
@@ -257,7 +261,9 @@ def score_repeating_motifs(
     onset = padded_onset[onset_preroll_frames : onset_preroll_frames + len(rms)]
     rms_db = librosa.amplitude_to_db(rms + 1e-8, ref=1.0)
 
-    segments: list[tuple[float, float, np.ndarray, np.ndarray, float]] = []
+    segments: list[
+        tuple[float, float, np.ndarray, np.ndarray, np.ndarray, float]
+    ] = []
     for start_sec in downbeats_array:
         end_sec = start_sec + motif_length
         if end_sec * sample_rate > len(mono):
@@ -265,49 +271,96 @@ def score_repeating_motifs(
         start_frame = int(librosa.time_to_frames(start_sec, sr=sample_rate, hop_length=hop_length))
         end_frame = int(librosa.time_to_frames(end_sec, sr=sample_rate, hop_length=hop_length))
         onset_segment = _resize_time(onset[None, start_frame:end_frame], 256).ravel()
-        chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64)
+        raw_chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64)
         # Remove the common pitch-bin floor per frame while retaining chord shape.
-        chroma_segment = chroma_segment - np.mean(
-            chroma_segment, axis=0, keepdims=True
+        mean_centered_chroma_segment = raw_chroma_segment - np.mean(
+            raw_chroma_segment, axis=0, keepdims=True
         )
-        chroma_segment = chroma_segment.ravel()
         active = rms_db[start_frame:end_frame] > config.silence_db
         active_ratio = float(np.sum(active) / len(active)) if len(active) else 0.0
         if active_ratio < config.min_presence:
             continue
-        segments.append((start_sec, end_sec, onset_segment, chroma_segment, active_ratio))
+        segments.append(
+            (
+                start_sec,
+                end_sec,
+                onset_segment,
+                raw_chroma_segment.ravel(),
+                mean_centered_chroma_segment.ravel(),
+                active_ratio,
+            )
+        )
 
-    candidates: list[tuple[int, int, float, float, float, float]] = []
-    for start_sec, end_sec, first_onset, first_chroma, active_ratio in segments:
+    candidates: list[tuple[int, int, float, float, float, float, float, float]] = []
+    for (
+        start_sec,
+        end_sec,
+        first_onset,
+        first_raw_chroma,
+        first_mean_centered_chroma,
+        active_ratio,
+    ) in segments:
         if start_sec >= config.search_seconds:
             break
-        onset_scores: list[float] = []
-        chroma_scores: list[float] = []
-        for other_start, _, other_onset, other_chroma, _ in segments:
+        raw_onset_scores: list[float] = []
+        raw_chroma_scores: list[float] = []
+        mean_centered_onset_scores: list[float] = []
+        mean_centered_chroma_scores: list[float] = []
+        for (
+            other_start,
+            _,
+            other_onset,
+            other_raw_chroma,
+            other_mean_centered_chroma,
+            _,
+        ) in segments:
             if abs(other_start - start_sec) < motif_length * 0.9:
                 continue
-            onset_similarity = _max_shifted_cosine_similarity(
+            raw_onset_similarity = _max_shifted_cosine_similarity(
                 first_onset,
                 other_onset,
                 max_shift=3,
                 cosine_similarity=cosine_similarity,
+                mean_center=False,
             )
-            chroma_similarity = cosine_similarity(first_chroma[None], other_chroma[None])[0, 0]
-            onset_scores.append(float(onset_similarity))
-            chroma_scores.append(float(chroma_similarity))
-        if not onset_scores:
+            mean_centered_onset_similarity = _max_shifted_cosine_similarity(
+                first_onset,
+                other_onset,
+                max_shift=3,
+                cosine_similarity=cosine_similarity,
+                mean_center=True,
+            )
+            raw_chroma_similarity = cosine_similarity(
+                first_raw_chroma[None], other_raw_chroma[None]
+            )[0, 0]
+            mean_centered_chroma_similarity = cosine_similarity(
+                first_mean_centered_chroma[None],
+                other_mean_centered_chroma[None],
+            )[0, 0]
+            raw_onset_scores.append(float(raw_onset_similarity))
+            raw_chroma_scores.append(float(raw_chroma_similarity))
+            mean_centered_onset_scores.append(float(mean_centered_onset_similarity))
+            mean_centered_chroma_scores.append(float(mean_centered_chroma_similarity))
+        if not raw_onset_scores:
             continue
-        onset_similarity = float(np.mean(onset_scores))
-        chroma_similarity = float(np.mean(chroma_scores))
+        onset_similarity = float(np.mean(raw_onset_scores))
+        chroma_similarity = float(np.mean(raw_chroma_scores))
         if abs(onset_similarity - chroma_similarity) > config.max_similarity_difference:
             continue
-        similarity = 0.3 * onset_similarity + 0.7 * chroma_similarity
+        mean_centered_onset_similarity = float(np.mean(mean_centered_onset_scores))
+        mean_centered_chroma_similarity = float(np.mean(mean_centered_chroma_scores))
+        similarity = (
+            0.7 * mean_centered_onset_similarity
+            + 0.3 * mean_centered_chroma_similarity
+        )
         candidates.append(
             (
                 int(start_sec * sample_rate),
                 int(end_sec * sample_rate),
                 onset_similarity,
                 chroma_similarity,
+                mean_centered_onset_similarity,
+                mean_centered_chroma_similarity,
                 float(similarity),
                 active_ratio,
             )
@@ -352,7 +405,10 @@ class MotifExtractor:
         eligible = [
             row
             for row in result["candidates"]
-            if row["onset_similarity"] >= self.config.onset_threshold
+            if row["active_ratio"] >= self.config.min_presence
+            and abs(row["onset_similarity"] - row["chroma_similarity"])
+            <= self.config.max_similarity_difference
+            and row["onset_similarity"] >= self.config.onset_threshold
             and row["pitch_class_span"] >= self.config.pitch_class_span_threshold
         ]
         first_by_stem: dict[str, dict[str, float | int | str]] = {}
@@ -370,6 +426,8 @@ class MotifExtractor:
                     "active_ratio": None,
                     "onset_similarity": None,
                     "chroma_similarity": None,
+                    "mean_centered_onset_similarity": None,
+                    "mean_centered_chroma_similarity": None,
                     "pitch_class_span": None,
                     "similarity": 0.0,
                 }
@@ -381,6 +439,12 @@ class MotifExtractor:
                 "active_ratio": float(match["active_ratio"]),
                 "onset_similarity": float(match["onset_similarity"]),
                 "chroma_similarity": float(match["chroma_similarity"]),
+                "mean_centered_onset_similarity": float(
+                    match["mean_centered_onset_similarity"]
+                ),
+                "mean_centered_chroma_similarity": float(
+                    match["mean_centered_chroma_similarity"]
+                ),
                 "pitch_class_span": float(match["pitch_class_span"]),
                 "similarity": float(match["similarity"]),
             }
@@ -390,6 +454,16 @@ class MotifExtractor:
                 "No repeated four-bar motif passed the onset and pitch-class-span thresholds."
             )
         match = max(first_by_stem.values(), key=lambda row: float(row["similarity"]))
+        if (
+            float(match["mean_centered_onset_similarity"])
+            < self.config.mean_centered_similarity_threshold
+            or float(match["mean_centered_chroma_similarity"])
+            < self.config.mean_centered_similarity_threshold
+        ):
+            raise ValueError(
+                "Selected motif mean-centered onset/chroma similarity is below "
+                f"{self.config.mean_centered_similarity_threshold:.6f}."
+            )
         name = str(match["stem_name"])
         start = round(float(match["start_sec"]) * sample_rate)
         end = round(float(match["end_sec"]) * sample_rate)
@@ -437,6 +511,8 @@ class MotifExtractor:
                 end,
                 onset_similarity,
                 chroma_similarity,
+                mean_centered_onset_similarity,
+                mean_centered_chroma_similarity,
                 similarity,
                 active_ratio,
             ) in enumerate(matches):
@@ -449,6 +525,8 @@ class MotifExtractor:
                         "active_ratio": active_ratio,
                         "onset_similarity": onset_similarity,
                         "chroma_similarity": chroma_similarity,
+                        "mean_centered_onset_similarity": mean_centered_onset_similarity,
+                        "mean_centered_chroma_similarity": mean_centered_chroma_similarity,
                         "similarity": float(similarity),
                         "pitch_class_span": pitch_class_span(
                             melodic[:, start:end], sample_rate

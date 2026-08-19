@@ -107,6 +107,15 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertAlmostEqual(similarity, 1.0)
 
+        raw_similarity = _max_shifted_cosine_similarity(
+            first,
+            second,
+            max_shift=0,
+            cosine_similarity=cosine_similarity,
+            mean_center=False,
+        )
+        self.assertLess(raw_similarity, 1.0)
+
     def test_melodic_accompaniment_excludes_drums_and_vocals(self):
         stems = {
             "guitar": _FakeStem(0.4),
@@ -143,19 +152,28 @@ class MotifScoreTests(unittest.TestCase):
                 {
                     "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
                     "active_ratio": 0.9, "onset_similarity": 0.59,
-                    "chroma_similarity": 0.8, "similarity": 0.737,
+                    "chroma_similarity": 0.8,
+                    "mean_centered_onset_similarity": 0.8,
+                    "mean_centered_chroma_similarity": 0.8,
+                    "similarity": 0.8,
                     "pitch_class_span": 0.7,
                 },
                 {
                     "stem_name": "guitar", "start_sec": 2.0, "end_sec": 6.0,
                     "active_ratio": 0.9, "onset_similarity": 0.61,
-                    "chroma_similarity": 0.7, "similarity": 0.673,
+                    "chroma_similarity": 0.99,
+                    "mean_centered_onset_similarity": 0.5,
+                    "mean_centered_chroma_similarity": 0.4,
+                    "similarity": 0.47,
                     "pitch_class_span": 0.31,
                 },
                 {
                     "stem_name": "piano", "start_sec": 3.0, "end_sec": 7.0,
                     "active_ratio": 0.8, "onset_similarity": 0.62,
-                    "chroma_similarity": 0.9, "similarity": 0.819,
+                    "chroma_similarity": 0.63,
+                    "mean_centered_onset_similarity": 0.6,
+                    "mean_centered_chroma_similarity": 0.7,
+                    "similarity": 0.63,
                     "pitch_class_span": 0.5,
                 },
             ],
@@ -174,7 +192,7 @@ class MotifScoreTests(unittest.TestCase):
         score_all.assert_not_called()
         self.assertEqual(result["stem_name"], "piano")
         self.assertAlmostEqual(result["stem_scores"]["guitar"]["start_sec"], 2.0)
-        self.assertAlmostEqual(result["stem_scores"]["piano"]["similarity"], 0.819)
+        self.assertAlmostEqual(result["stem_scores"]["piano"]["similarity"], 0.63)
         self.assertAlmostEqual(result["onset_variation"], 0.20)
         variation.assert_called_once()
         self.assertNotIn("dominance", result["stem_scores"]["guitar"])
@@ -191,13 +209,19 @@ class MotifScoreTests(unittest.TestCase):
                 {
                     "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
                     "active_ratio": 0.9, "onset_similarity": 0.60,
-                    "chroma_similarity": 0.7, "similarity": 0.67,
+                    "chroma_similarity": 0.7,
+                    "mean_centered_onset_similarity": 0.4,
+                    "mean_centered_chroma_similarity": 0.4,
+                    "similarity": 0.4,
                     "pitch_class_span": 0.31,
                 },
                 {
                     "stem_name": "piano", "start_sec": 2.0, "end_sec": 6.0,
                     "active_ratio": 0.9, "onset_similarity": 0.60,
-                    "chroma_similarity": 0.8, "similarity": 0.74,
+                    "chroma_similarity": 0.8,
+                    "mean_centered_onset_similarity": 0.7,
+                    "mean_centered_chroma_similarity": 0.7,
+                    "similarity": 0.7,
                     "pitch_class_span": 0.16666666666666666,
                 },
             ],
@@ -221,7 +245,10 @@ class MotifScoreTests(unittest.TestCase):
                 {
                     "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
                     "active_ratio": 0.9, "onset_similarity": 0.60,
-                    "chroma_similarity": 0.8, "similarity": 0.74,
+                    "chroma_similarity": 0.8,
+                    "mean_centered_onset_similarity": 0.4,
+                    "mean_centered_chroma_similarity": 0.4,
+                    "similarity": 0.4,
                     "pitch_class_span": 0.5,
                 },
             ],
@@ -236,6 +263,33 @@ class MotifScoreTests(unittest.TestCase):
 
     @patch("mohim.motif.onset_variation")
     @patch.object(MotifExtractor, "score_all")
+    def test_extract_rejects_final_candidate_below_mean_centered_threshold(
+        self, score_all, variation
+    ):
+        stem = _FakeStem(0.8)
+        score_all.return_value = {
+            "candidates": [
+                {
+                    "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
+                    "active_ratio": 0.9, "onset_similarity": 0.60,
+                    "chroma_similarity": 0.8,
+                    "mean_centered_onset_similarity": 0.279,
+                    "mean_centered_chroma_similarity": 0.8,
+                    "similarity": 0.4353,
+                    "pitch_class_span": 0.5,
+                },
+            ],
+            "melodic_accompaniment": _FakeStem(1.0),
+        }
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+
+        with self.assertRaisesRegex(ValueError, "mean-centered"):
+            extractor.extract("song.wav", {"guitar": stem}, None, 100)
+
+        variation.assert_not_called()
+
+    @patch("mohim.motif.onset_variation")
+    @patch.object(MotifExtractor, "score_all")
     def test_extract_uses_validated_final_audio_onset_variation(
         self, score_all, variation
     ):
@@ -245,7 +299,10 @@ class MotifScoreTests(unittest.TestCase):
                 {
                     "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
                     "active_ratio": 0.9, "onset_similarity": 0.60,
-                    "chroma_similarity": 0.8, "similarity": 0.74,
+                    "chroma_similarity": 0.8,
+                    "mean_centered_onset_similarity": 0.4,
+                    "mean_centered_chroma_similarity": 0.4,
+                    "similarity": 0.4,
                     "pitch_class_span": 0.5,
                 },
             ],
@@ -271,9 +328,12 @@ class MotifScoreTests(unittest.TestCase):
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
         score_motifs.side_effect = lambda stem, *_args: (
-            [(100, 500, 0.10, 0.24, 0.20, 0.8), (200, 600, 0.60, 0.74, 0.70, 0.9)]
+            [
+                (100, 500, 0.10, 0.24, 0.11, 0.21, 0.14, 0.8),
+                (200, 600, 0.60, 0.74, 0.70, 0.60, 0.67, 0.9),
+            ]
             if stem is guitar
-            else [(300, 700, 0.30, 0.44, 0.40, 0.8)]
+            else [(300, 700, 0.30, 0.44, 0.40, 0.30, 0.37, 0.8)]
         )
         extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
 
@@ -281,7 +341,7 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertEqual(len(result["candidates"]), 3)
         self.assertEqual([row["candidate_index"] for row in result["candidates"]], [0, 1, 0])
-        self.assertEqual([row["similarity"] for row in result["candidates"]], [0.2, 0.7, 0.4])
+        self.assertEqual([row["similarity"] for row in result["candidates"]], [0.14, 0.67, 0.37])
         self.assertEqual(
             [row["pitch_class_span"] for row in result["candidates"]],
             [0.25, 0.5, 0.75],
@@ -295,16 +355,16 @@ class MotifScoreTests(unittest.TestCase):
     @patch("mohim.motif.score_repeating_motifs")
     def test_find_repeating_motif_uses_onset_and_pitch_thresholds(self, score_motifs, _span):
         score_motifs.return_value = [
-            (100, 500, 0.59, 0.80, 0.737, 0.9),
-            (200, 600, 0.60, 0.80, 0.740, 0.8),
-            (300, 700, 0.60, 0.20, 0.320, 0.8),
+            (100, 500, 0.59, 0.80, 0.50, 0.60, 0.53, 0.9),
+            (200, 600, 0.60, 0.80, 0.70, 0.60, 0.67, 0.8),
+            (300, 700, 0.60, 0.20, 0.20, 0.30, 0.23, 0.8),
         ]
 
         result = find_repeating_motif(
             _FakeStem(1.0), 100, [0, 1, 2], MotifConfig()
         )
 
-        self.assertEqual(result, (200, 600, 0.740))
+        self.assertEqual(result, (200, 600, 0.67))
 
     def test_repeating_motifs_filter_by_absolute_active_ratio_and_report_components(self):
         librosa = types.ModuleType("librosa")
@@ -410,11 +470,22 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(len(result), 4)
         self.assertEqual(len(stricter_presence_threshold), 3)
         self.assertEqual([row[0] for row in result], [0, 200, 400, 600])
-        self.assertEqual([row[5] for row in result], [0.7, 0.8, 1.0, 1.0])
-        for _, _, onset_similarity, chroma_similarity, similarity, _ in result:
+        self.assertEqual([row[7] for row in result], [0.7, 0.8, 1.0, 1.0])
+        for (
+            _,
+            _,
+            onset_similarity,
+            chroma_similarity,
+            mean_centered_onset_similarity,
+            mean_centered_chroma_similarity,
+            similarity,
+            _,
+        ) in result:
             self.assertAlmostEqual(onset_similarity, 0.6)
             self.assertAlmostEqual(chroma_similarity, 0.8)
-            self.assertAlmostEqual(similarity, 0.74)
+            self.assertAlmostEqual(mean_centered_onset_similarity, 0.6)
+            self.assertAlmostEqual(mean_centered_chroma_similarity, 0.8)
+            self.assertAlmostEqual(similarity, 0.66)
         self.assertEqual(len(difference_below_threshold), 3)
         self.assertEqual(len(difference_at_threshold), 3)
         self.assertEqual(difference_above_threshold, [])
@@ -422,9 +493,22 @@ class MotifScoreTests(unittest.TestCase):
         self.assertIn((256, 256), cosine_shapes)
         self.assertIn((768, 768), cosine_shapes)
         self.assertTrue(chroma_cosine_inputs)
-        for first, second in chroma_cosine_inputs:
-            np.testing.assert_allclose(first.reshape(12, 64).mean(axis=0), 0.0)
-            np.testing.assert_allclose(second.reshape(12, 64).mean(axis=0), 0.0)
+        chroma_means = [
+            (
+                first.reshape(12, 64).mean(axis=0),
+                second.reshape(12, 64).mean(axis=0),
+            )
+            for first, second in chroma_cosine_inputs
+        ]
+        self.assertTrue(
+            any(not np.allclose(first_mean, 0.0) for first_mean, _ in chroma_means)
+        )
+        self.assertTrue(
+            any(
+                np.allclose(first_mean, 0.0) and np.allclose(second_mean, 0.0)
+                for first_mean, second_mean in chroma_means
+            )
+        )
         self.assertEqual(len(onset_inputs), 6)
         for onset_input in onset_inputs:
             self.assertEqual(onset_input["n_fft"], 2048)
