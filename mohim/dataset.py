@@ -6,11 +6,88 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
-from .local_dataset import LocalTrack, index_audio_files, resolve_audio_path
 from .motif import MotifExtractor
 from .separator import StemSeparator, save_audio
+
+
+@dataclass(frozen=True)
+class LocalTrack:
+    track_id: str
+    artist: str
+    title: str
+    genres: tuple[str, ...]
+    language: str
+    lyrics: str
+    duration_seconds: float | None
+    audio_url: str | None
+    audio_path: str | None
+    entry: Any
+
+
+def load_local_tracks(
+    manifest_path: str | Path,
+    *,
+    require_lyrics: bool = True,
+    max_duration_seconds: float | None = None,
+) -> list[LocalTrack]:
+    path = Path(manifest_path).expanduser().resolve()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("tracks"), list):
+        raise ValueError(f"JSON must contain a 'tracks' list: {path}")
+
+    tracks: list[LocalTrack] = []
+    for item in payload["tracks"]:
+        duration = item.get("duration_seconds")
+        if (
+            max_duration_seconds is not None
+            and duration is not None
+            and float(duration) > max_duration_seconds
+        ):
+            continue
+        lyrics = str(item.get("lyrics") or "").strip()
+        if require_lyrics and not lyrics:
+            continue
+        genres = item.get("genres") or ()
+        if isinstance(genres, str):
+            genres = [genres]
+        tracks.append(
+            LocalTrack(
+                track_id=str(item.get("track_id") or item.get("seed_id") or item.get("id")),
+                artist=str(item.get("artist") or "").strip(),
+                title=str(item.get("title") or "").strip(),
+                genres=tuple(str(value).strip() for value in genres if str(value).strip()),
+                language=str(item.get("language") or "").strip(),
+                lyrics=lyrics,
+                duration_seconds=float(duration) if duration is not None else None,
+                audio_url=str(item.get("source_url") or "") or None,
+                audio_path=str(item.get("audio_path") or "") or None,
+                entry=item,
+            )
+        )
+    return tracks
+
+
+def index_audio_files(audio_dir: str | Path) -> dict[str, Path]:
+    root = Path(audio_dir).expanduser().resolve()
+    if not root.is_dir():
+        return {}
+    extensions = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".webm"}
+    return {
+        path.stem: path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.casefold() in extensions
+    }
+
+
+def resolve_audio_path(track: LocalTrack, audio_index: Mapping[str, Path]) -> Path | None:
+    if track.audio_path:
+        direct = Path(track.audio_path).expanduser()
+        if direct.is_file():
+            return direct.resolve()
+    youtube_id = str(track.entry.get("youtube_id") or "") if isinstance(track.entry, Mapping) else ""
+    return audio_index.get(youtube_id) or audio_index.get(track.track_id)
 
 
 def _track_directory_name(track: LocalTrack) -> str:
@@ -80,6 +157,33 @@ class DatasetBuilder:
             raise ValueError("audio_format must be either 'flac' or 'wav'.")
         self.resume = resume
 
+    def _rejected_result(
+        self,
+        track: LocalTrack,
+        sample_dir: Path,
+        reason: str,
+    ) -> BuildResult:
+        metadata_path = sample_dir / "metadata.json"
+        if sample_dir.is_dir():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+            metadata.update(
+                {
+                    "schema_version": 4,
+                    "status": "rejected",
+                    "track_id": track.track_id,
+                    "artist": track.artist,
+                    "title": track.title,
+                    "rejection_reason": reason,
+                }
+            )
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        return BuildResult(track.track_id, "rejected", reason, None, None)
+
     def _accepted_result(self, track: LocalTrack, sample_dir: Path) -> BuildResult | None:
         metadata_path = sample_dir / "metadata.json"
         if not self.resume or not metadata_path.is_file():
@@ -103,6 +207,7 @@ class DatasetBuilder:
             and all(required_names)
             and isinstance(stem_files, dict)
             and stem_files.get("vocals") == metadata.get("vocal_target_file")
+            and isinstance(metadata.get("motif_onset_variation"), (int, float))
             and "drums" not in stem_files
             and all(path.is_file() for path in required)
         ):
@@ -124,9 +229,9 @@ class DatasetBuilder:
 
         audio_path = resolve_audio_path(track, audio_index)
         if audio_path is None:
-            return BuildResult(track.track_id, "rejected", "audio_not_found", None, None)
+            return self._rejected_result(track, sample_dir, "audio_not_found")
         if not track.lyrics.strip():
-            return BuildResult(track.track_id, "rejected", "lyrics_missing", None, None)
+            return self._rejected_result(track, sample_dir, "lyrics_missing")
 
         try:
             if separation_result is None:
@@ -149,7 +254,11 @@ class DatasetBuilder:
                 motif["audio"], stems
             )
         except Exception as exc:  # keep a large batch running and report the exact cause
-            return BuildResult(track.track_id, "rejected", f"{type(exc).__name__}: {exc}", None, None)
+            return self._rejected_result(
+                track,
+                sample_dir,
+                f"{type(exc).__name__}: {exc}",
+            )
 
         sample_dir.mkdir(parents=True, exist_ok=True)
         extension = self.audio_format
@@ -200,6 +309,7 @@ class DatasetBuilder:
             "motif_stem": motif["stem_name"],
             "motif_scores": motif["stem_scores"],
             "motif_similarity": motif["similarity"],
+            "motif_onset_variation": motif["onset_variation"],
             "motif_start_sec": motif["start_sec"],
             "motif_end_sec": motif["end_sec"],
             "motif_seed_file": motif_seed_name,

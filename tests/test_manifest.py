@@ -24,6 +24,7 @@ class ManifestTests(unittest.TestCase):
                 "artist": "Artist",
                 "title": "Title",
                 "motif_stem": "guitar",
+                "motif_onset_variation": 0.3,
                 "motif_seed_file": "motif.flac",
                 "accompaniment_target_file": "accompaniment.flac",
                 "vocal_target_file": "vocals.flac",

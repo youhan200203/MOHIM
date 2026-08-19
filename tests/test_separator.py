@@ -26,8 +26,8 @@ class StemSeparatorBatchTests(unittest.TestCase):
         demucs = types.ModuleType("demucs")
         demucs_apply = types.ModuleType("demucs.apply")
 
-        def apply_model(model, batch, *, device):
-            calls.append((model, batch.shape, device))
+        def apply_model(model, batch, *, device, shifts):
+            calls.append((model, batch.shape, device, shifts))
             output = torch.zeros((batch.shape[0], 2, 2, batch.shape[-1]))
             output[0, 0] = 1.0
             output[0, 1] = 2.0
@@ -46,7 +46,7 @@ class StemSeparatorBatchTests(unittest.TestCase):
         ):
             results = separator.separate_many(["short.wav", "long.wav"])
 
-        self.assertEqual(calls, [(model, torch.Size([2, 2, 5]), "cpu")])
+        self.assertEqual(calls, [(model, torch.Size([2, 2, 5]), "cpu", 0)])
         self.assertEqual(results[0][0]["vocals"].shape, (2, 3))
         self.assertEqual(results[1][0]["vocals"].shape, (2, 5))
         self.assertTrue(torch.all(results[0][0]["other"] == 2.0))

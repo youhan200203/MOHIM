@@ -4,6 +4,7 @@ torchvision==0.25.0+cu128; sys_platform == 'linux' and platform_machine == 'x86_
 torchaudio==2.10.0+cu128; sys_platform == 'linux' and platform_machine == 'x86_64'
 yt-dlp>=2024.12.23
 lyricsgenius>=3.2.0
+billboard.py>=7.1.0
 beautifulsoup4>=4.12.3
 requests==2.32.4
 demucs>=4.0.1

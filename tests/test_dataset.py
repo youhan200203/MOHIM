@@ -11,11 +11,12 @@ except ImportError:  # local lightweight test environments may omit training dep
 
 from mohim.dataset import (
     DatasetBuilder,
+    LocalTrack,
     _apply_common_headroom,
     _sum_accompaniment,
     _track_directory_name,
+    load_local_tracks,
 )
-from mohim.local_dataset import LocalTrack
 
 
 @unittest.skipIf(torch is None, "torch is not installed")
@@ -84,6 +85,7 @@ class DatasetBuilderTests(unittest.TestCase):
                         "status": "accepted",
                         "track_id": "shape-of-you-id",
                         "motif_stem": "other",
+                        "motif_onset_variation": 0.3,
                         "motif_seed_file": "motif.flac",
                         "accompaniment_target_file": "accompaniment.flac",
                         "vocal_target_file": "vocals.flac",
@@ -117,6 +119,7 @@ class DatasetBuilderTests(unittest.TestCase):
                 "stem_name": "other",
                 "stem_scores": {},
                 "similarity": 0.7,
+                "onset_variation": 0.3,
                 "start_sec": 1.0,
                 "end_sec": 5.0,
             }
@@ -150,6 +153,74 @@ class DatasetBuilderTests(unittest.TestCase):
             44_100,
             scored_result=motif_scores,
         )
+
+    def test_reprocess_rejection_invalidates_previous_accepted_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audio_path = root / "song.m4a"
+            audio_path.touch()
+            sample_dir = root / "output" / "Ed Sheeran - Shape of You"
+            sample_dir.mkdir(parents=True)
+            metadata_path = sample_dir / "metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "status": "accepted",
+                        "track_id": "shape-of-you-id",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            motif_extractor = Mock()
+            motif_extractor.extract.side_effect = ValueError(
+                "Selected motif onset variation 0.199 is below 0.200."
+            )
+            builder = DatasetBuilder(
+                audio_dir=root,
+                output_dir=root / "output",
+                separator=object(),
+                motif_extractor=motif_extractor,
+                resume=False,
+            )
+
+            result = builder.process_track(
+                _track(),
+                {"shape-of-you-id": audio_path},
+                separation_result=({"vocals": object(), "other": object()}, 44_100, object()),
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(metadata["status"], "rejected")
+        self.assertIn("onset variation", metadata["rejection_reason"])
+
+    def test_load_local_tracks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "tracks.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "tracks": [
+                            {
+                                "track_id": "song-1",
+                                "artist": "Artist",
+                                "title": "Title",
+                                "genres": ["Pop"],
+                                "language": "English",
+                                "lyrics": "Lyrics",
+                                "audio_path": "/tmp/song.m4a",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            tracks = load_local_tracks(manifest)
+
+        self.assertEqual(tracks[0].track_id, "song-1")
+        self.assertEqual(tracks[0].lyrics, "Lyrics")
 
 
 if __name__ == "__main__":

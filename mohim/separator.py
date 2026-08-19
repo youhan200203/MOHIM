@@ -7,9 +7,15 @@ from typing import Any, Iterable
 
 
 class StemSeparator:
-    def __init__(self, device: str = "cuda", model_name: str = "htdemucs_6s") -> None:
+    def __init__(
+        self,
+        device: str = "cuda",
+        model_name: str = "htdemucs_6s",
+        shifts: int = 0,
+    ) -> None:
         self.device = device
         self.model_name = model_name
+        self.shifts = shifts
         self._model: Any = None
 
     @property
@@ -67,7 +73,12 @@ class StemSeparator:
         )
 
         with torch.inference_mode():
-            batch_sources = apply_model(self.model, batch.to(self.device), device=self.device)
+            batch_sources = apply_model(
+                self.model,
+                batch.to(self.device),
+                device=self.device,
+                shifts=self.shifts,
+            )
 
         results = []
         for song_index, (mixture, length) in enumerate(zip(mixtures, lengths)):

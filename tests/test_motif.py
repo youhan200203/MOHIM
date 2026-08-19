@@ -112,8 +112,11 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(movement_score([60]), 0.0)
         self.assertEqual(repetition_score([60, 62]), 0.0)
 
+    @patch("mohim.motif.onset_variation", return_value=0.20)
     @patch.object(MotifExtractor, "score_all")
-    def test_extract_reuses_scores_and_compares_first_passing_motifs(self, score_all):
+    def test_extract_reuses_scores_and_compares_first_passing_motifs(
+        self, score_all, variation
+    ):
         guitar = _FakeStem(0.8)
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
@@ -154,11 +157,14 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(result["stem_name"], "piano")
         self.assertAlmostEqual(result["stem_scores"]["guitar"]["start_sec"], 2.0)
         self.assertAlmostEqual(result["stem_scores"]["piano"]["similarity"], 0.819)
+        self.assertAlmostEqual(result["onset_variation"], 0.20)
+        variation.assert_called_once()
         self.assertNotIn("dominance", result["stem_scores"]["guitar"])
         self.assertNotIn("total", result["stem_scores"]["guitar"])
 
+    @patch("mohim.motif.onset_variation", return_value=0.20)
     @patch.object(MotifExtractor, "score_all")
-    def test_extract_records_stems_without_a_passing_motif(self, score_all):
+    def test_extract_records_stems_without_a_passing_motif(self, score_all, _variation):
         guitar = _FakeStem(0.8)
         piano = _FakeStem(0.2)
         stems = {"guitar": guitar, "piano": piano}
@@ -185,6 +191,30 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertFalse(result["stem_scores"]["piano"]["matched"])
         self.assertIsNone(result["stem_scores"]["piano"]["start_sec"])
+
+    @patch("mohim.motif.onset_variation", return_value=0.199)
+    @patch.object(MotifExtractor, "score_all")
+    def test_extract_rejects_final_candidate_below_onset_variation_threshold(
+        self, score_all, variation
+    ):
+        stem = _FakeStem(0.8)
+        score_all.return_value = {
+            "candidates": [
+                {
+                    "stem_name": "guitar", "start_sec": 1.0, "end_sec": 5.0,
+                    "active_ratio": 0.9, "onset_similarity": 0.60,
+                    "chroma_similarity": 0.8, "similarity": 0.74,
+                    "pitch_class_span": 0.5,
+                },
+            ],
+            "melodic_accompaniment": _FakeStem(1.0),
+        }
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+
+        with self.assertRaisesRegex(ValueError, "onset variation"):
+            extractor.extract("song.wav", {"guitar": stem}, None, 100)
+
+        variation.assert_called_once()
 
     @patch("mohim.motif.pitch_class_span", side_effect=[0.25, 0.5, 0.75])
     @patch("mohim.motif.score_repeating_motifs")

@@ -22,6 +22,7 @@ class MotifConfig:
     max_similarity_difference: float = 0.40
     onset_threshold: float = 0.60
     pitch_class_span_threshold: float = 0.25
+    onset_variation_threshold: float = 0.20
     min_stem_score: float = 0.25
 
 
@@ -159,6 +160,43 @@ def pitch_class_span(audio: Any, sample_rate: int, hop_length: int = 512) -> flo
     active_pc = valid_norm >= (0.60 * valid_norm.max(axis=0, keepdims=True))
     pitch_class_count = int(np.sum(np.mean(active_pc, axis=1) >= 0.10))
     return pitch_class_count / 12.0
+
+
+def _robust_cv(values: Any) -> float:
+    array = np.asarray(values, dtype=np.float64)
+    if len(array) < 2:
+        return 0.0
+    median = np.median(array)
+    mad = np.median(np.abs(array - median))
+    return float(np.clip(mad / (abs(median) + 1e-8), 0.0, 1.0))
+
+
+def onset_variation(audio: Any, sample_rate: int, hop_length: int = 512) -> float:
+    """Return robust variation in onset strengths and inter-onset intervals."""
+    import librosa
+
+    if hasattr(audio, "detach"):
+        mono = audio.mean(0).detach().cpu().numpy()
+    else:
+        values = np.asarray(audio)
+        mono = values.mean(0) if values.ndim > 1 else values
+    onset = librosa.onset.onset_strength(
+        y=mono,
+        sr=sample_rate,
+        hop_length=hop_length,
+    )
+    if not len(onset) or float(np.max(onset)) <= 0.0:
+        return 0.0
+    peaks = librosa.util.peak_pick(
+        onset,
+        pre_max=2,
+        post_max=2,
+        pre_avg=2,
+        post_avg=2,
+        delta=0.05 * float(np.max(onset)),
+        wait=1,
+    )
+    return 0.5 * (_robust_cv(onset[peaks]) + _robust_cv(np.diff(peaks)))
 
 
 def find_repeating_motif(
@@ -343,6 +381,13 @@ class MotifExtractor:
         name = str(match["stem_name"])
         start = round(float(match["start_sec"]) * sample_rate)
         end = round(float(match["end_sec"]) * sample_rate)
+        motif_audio = result["melodic_accompaniment"][:, start:end]
+        variation = onset_variation(motif_audio, sample_rate)
+        if variation < self.config.onset_variation_threshold:
+            raise ValueError(
+                "Selected motif onset variation "
+                f"{variation:.6f} is below {self.config.onset_variation_threshold:.6f}."
+            )
         return {
             "stem_name": name,
             "stem_scores": scores,
@@ -351,7 +396,8 @@ class MotifExtractor:
             "start_sec": float(match["start_sec"]),
             "end_sec": float(match["end_sec"]),
             "similarity": float(match["similarity"]),
-            "audio": result["melodic_accompaniment"][:, start:end],
+            "onset_variation": variation,
+            "audio": motif_audio,
         }
 
     def score_all(

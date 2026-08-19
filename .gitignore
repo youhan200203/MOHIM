@@ -6,14 +6,17 @@ __pycache__/
 .env
 
 # Local research data and generated artifacts
-dali_v2/
-dali_audio/
-dali_motif_dataset/
+billboard_pop_dataset/
+billboard_pop_genius_seed*.json
+hi.json
 checkpoints/
 outputs/
 *.wav
 *.flac
 *.mp3
+
+.venv-dataset/
+.venv-dataset312/
 
 # Local-only project document
 MOHIM.ipynb
