@@ -89,6 +89,24 @@ class MotifScoreTests(unittest.TestCase):
 
         self.assertAlmostEqual(similarity, 1.0)
 
+    def test_onset_similarity_ignores_constant_baseline(self):
+        first = np.array([1.0, 4.0, 1.0, 3.0])
+        second = first + 10.0
+
+        def cosine_similarity(left, right):
+            denominator = np.linalg.norm(left) * np.linalg.norm(right)
+            score = float(np.dot(left.ravel(), right.ravel()) / denominator) if denominator else 0.0
+            return np.array([[score]])
+
+        similarity = _max_shifted_cosine_similarity(
+            first,
+            second,
+            max_shift=0,
+            cosine_similarity=cosine_similarity,
+        )
+
+        self.assertAlmostEqual(similarity, 1.0)
+
     def test_melodic_accompaniment_excludes_drums_and_vocals(self):
         stems = {
             "guitar": _FakeStem(0.4),
@@ -315,9 +333,12 @@ class MotifScoreTests(unittest.TestCase):
         metrics = types.ModuleType("sklearn.metrics")
         pairwise = types.ModuleType("sklearn.metrics.pairwise")
         cosine_shapes = []
+        chroma_cosine_inputs = []
 
         def cosine_similarity(first, second):
             cosine_shapes.append((first.shape[1], second.shape[1]))
+            if first.shape[1] == 768:
+                chroma_cosine_inputs.append((first.copy(), second.copy()))
             return np.array([[0.6 if first.shape[1] <= 256 else 0.8]])
 
         pairwise.cosine_similarity = cosine_similarity
@@ -400,6 +421,10 @@ class MotifScoreTests(unittest.TestCase):
         self.assertEqual(len(wider_difference_threshold), 3)
         self.assertIn((256, 256), cosine_shapes)
         self.assertIn((768, 768), cosine_shapes)
+        self.assertTrue(chroma_cosine_inputs)
+        for first, second in chroma_cosine_inputs:
+            np.testing.assert_allclose(first.reshape(12, 64).mean(axis=0), 0.0)
+            np.testing.assert_allclose(second.reshape(12, 64).mean(axis=0), 0.0)
         self.assertEqual(len(onset_inputs), 6)
         for onset_input in onset_inputs:
             self.assertEqual(onset_input["n_fft"], 2048)

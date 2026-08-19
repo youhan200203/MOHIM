@@ -121,6 +121,8 @@ def _max_shifted_cosine_similarity(
     max_shift: int,
     cosine_similarity: Any,
 ) -> float:
+    """Return the best shifted cosine after centering each temporal overlap."""
+
     scores = []
     for shift in range(-max_shift, max_shift + 1):
         if shift < 0:
@@ -132,7 +134,11 @@ def _max_shifted_cosine_similarity(
         else:
             first_overlap = first
             second_overlap = second
-        scores.append(float(cosine_similarity(first_overlap[None], second_overlap[None])[0, 0]))
+        first_centered = first_overlap - np.mean(first_overlap)
+        second_centered = second_overlap - np.mean(second_overlap)
+        scores.append(
+            float(cosine_similarity(first_centered[None], second_centered[None])[0, 0])
+        )
     return max(scores)
 
 
@@ -259,7 +265,12 @@ def score_repeating_motifs(
         start_frame = int(librosa.time_to_frames(start_sec, sr=sample_rate, hop_length=hop_length))
         end_frame = int(librosa.time_to_frames(end_sec, sr=sample_rate, hop_length=hop_length))
         onset_segment = _resize_time(onset[None, start_frame:end_frame], 256).ravel()
-        chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64).ravel()
+        chroma_segment = _resize_time(chroma[:, start_frame:end_frame], 64)
+        # Remove the common pitch-bin floor per frame while retaining chord shape.
+        chroma_segment = chroma_segment - np.mean(
+            chroma_segment, axis=0, keepdims=True
+        )
+        chroma_segment = chroma_segment.ravel()
         active = rms_db[start_frame:end_frame] > config.silence_db
         active_ratio = float(np.sum(active) / len(active)) if len(active) else 0.0
         if active_ratio < config.min_presence:
