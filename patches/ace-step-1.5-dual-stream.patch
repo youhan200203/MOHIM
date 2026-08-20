@@ -2211,11 +2211,53 @@ diff --git a/train.py b/train.py
 index f28b54e..3d419f6 100644
 --- a/train.py
 +++ b/train.py
-@@ -184,6 +184,7 @@ def _run_preprocess(args) -> int:
+@@ -149,4 +149,5 @@ def _run_preprocess(args) -> int:
+     """Run the two-pass preprocessing pipeline."""
+     from acestep.training_v2.preprocess import preprocess_audio_files
++    import time
+-
++
+     audio_dir = getattr(args, "audio_dir", None)
+@@ -175,4 +176,32 @@ def _run_preprocess(args) -> int:
+     print("[INFO] Two-pass pipeline (sequential model loading for low VRAM)")
+-
++    progress_state = {"pass": None, "started_at": None}
++
++    def _format_duration(seconds) -> str:
++        seconds = max(0, int(round(seconds)))
++        hours, remainder = divmod(seconds, 3600)
++        minutes, seconds = divmod(remainder, 60)
++        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
++
++    def _print_preprocess_progress(current, total, message) -> None:
++        pass_label = (
++            message.split("]", 1)[0].lstrip("[")
++            if message.startswith("[Pass ")
++            else "Preprocess"
++        )
++        if progress_state["pass"] != pass_label:
++            progress_state["pass"] = pass_label
++            progress_state["started_at"] = time.monotonic()
++        completed = min(max(int(current), 0), int(total))
++        remaining = max(int(total) - completed, 0)
++        elapsed = time.monotonic() - progress_state["started_at"]
++        eta = elapsed * remaining / completed if completed else None
++        eta_text = _format_duration(eta) if eta is not None else "--:--:--"
++        detail = message.split("]", 1)[1].strip() if "]" in message else message
++        print(
++            f"[{pass_label}] 완료 {completed}/{total} | 남음 {remaining} | "
++            f"경과 {_format_duration(elapsed)} | ETA {eta_text} | {detail}",
++            flush=True,
++        )
++
+     try:
+         result = preprocess_audio_files(
+@@ -184,6 +213,8 @@ def _run_preprocess(args) -> int:
              dataset_json=dataset_json,
              device=getattr(args, "device", "auto"),
              precision=getattr(args, "precision", "auto"),
 +            dual_stream=getattr(args, "dual_stream", False),
++            progress_callback=_print_preprocess_progress,
          )
      except Exception as exc:
          print(f"[FAIL] Preprocessing failed: {exc}", file=sys.stderr)
