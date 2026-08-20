@@ -247,6 +247,7 @@ class DatasetBuilder:
         separation_result: tuple[dict[str, Any], int, Any] | None = None,
         motif_scores: dict[str, Any] | None = None,
         validated_onset_variation: float | None = None,
+        selected_candidate: dict[str, Any] | None = None,
     ) -> BuildResult:
         sample_dir = self.output_dir / _track_directory_name(track)
         cached = self._accepted_result(
@@ -277,6 +278,7 @@ class DatasetBuilder:
                     mixture,
                     sample_rate,
                     validated_onset_variation=validated_onset_variation,
+                    selected_candidate=selected_candidate,
                 )
             else:
                 motif = self.motif_extractor.extract(
@@ -286,6 +288,7 @@ class DatasetBuilder:
                     sample_rate,
                     scored_result=motif_scores,
                     validated_onset_variation=validated_onset_variation,
+                    selected_candidate=selected_candidate,
                 )
             motif_audio, accompaniment, scaled_stems, target_gain = _apply_common_headroom(
                 motif["audio"], stems

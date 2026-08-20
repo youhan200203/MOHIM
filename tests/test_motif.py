@@ -248,6 +248,52 @@ class MotifScoreTests(unittest.TestCase):
         self.assertNotIn("dominance", result["stem_scores"]["guitar"])
         self.assertNotIn("total", result["stem_scores"]["guitar"])
 
+    @patch("mohim.motif.onset_variation")
+    @patch.object(MotifExtractor, "score_all")
+    def test_extract_uses_supplied_selection_without_reselecting_or_revalidating(
+        self, score_all, variation
+    ):
+        stems = {"guitar": _FakeStem(0.8), "piano": _FakeStem(0.2)}
+        scored_result = {
+            "candidates": [
+                {
+                    "stem_name": "piano",
+                    "start_sec": 3.0,
+                    "end_sec": 7.0,
+                    "similarity": 0.99,
+                }
+            ],
+            "melodic_accompaniment": _FakeStem(1.0),
+        }
+        selected_candidate = {
+            "stem_name": "guitar",
+            "start_sec": 2.0,
+            "end_sec": 6.0,
+            "similarity": 0.1,
+            "onset_variation": 0.1,
+        }
+        extractor = MotifExtractor(lambda _path: ([], [0, 1, 2]))
+
+        result = extractor.extract(
+            "song.wav",
+            stems,
+            None,
+            100,
+            scored_result=scored_result,
+            validated_onset_variation=0.9,
+            selected_candidate=selected_candidate,
+        )
+
+        score_all.assert_not_called()
+        variation.assert_not_called()
+        self.assertEqual(result["stem_name"], "guitar")
+        self.assertEqual(result["start_frame"], 200)
+        self.assertEqual(result["end_frame"], 600)
+        self.assertAlmostEqual(result["start_sec"], 2.0)
+        self.assertAlmostEqual(result["end_sec"], 6.0)
+        self.assertAlmostEqual(result["onset_variation"], 0.1)
+        self.assertAlmostEqual(result["similarity"], 0.1)
+
     @patch("mohim.motif.onset_variation", return_value=0.20)
     @patch.object(MotifExtractor, "score_all")
     def test_extract_records_stems_without_a_passing_motif(self, score_all, _variation):

@@ -482,15 +482,64 @@ class MotifExtractor:
         *,
         scored_result: dict[str, Any] | None = None,
         validated_onset_variation: float | None = None,
+        selected_candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Return the strongest first onset-and-pitch-passing motif across stems."""
+        """Return the supplied selection, or select a motif when none is supplied."""
         del full_wav  # Kept in the public API for DatasetBuilder compatibility.
+        candidates = [name for name in self.config.candidate_stems if name in stems]
+
+        if selected_candidate is not None:
+            result = (
+                scored_result
+                if scored_result is not None
+                else {"melodic_accompaniment": melodic_accompaniment(stems, candidates)}
+            )
+            match = dict(selected_candidate)
+            name = str(match["stem_name"])
+            start_sec = float(match["start_sec"])
+            end_sec = float(match["end_sec"])
+            start = round(start_sec * sample_rate)
+            end = round(end_sec * sample_rate)
+            motif_audio = result["melodic_accompaniment"][:, start:end]
+            if "onset_variation" in match:
+                variation = float(match["onset_variation"])
+            elif validated_onset_variation is not None:
+                variation = float(validated_onset_variation)
+            else:
+                variation = onset_variation(motif_audio, sample_rate)
+            selected_score = {
+                "matched": True,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "active_ratio": match.get("active_ratio"),
+                "onset_similarity": match.get("onset_similarity"),
+                "chroma_similarity": match.get("chroma_similarity"),
+                "mean_centered_onset_similarity": match.get(
+                    "mean_centered_onset_similarity"
+                ),
+                "mean_centered_chroma_similarity": match.get(
+                    "mean_centered_chroma_similarity"
+                ),
+                "pitch_class_span": match.get("pitch_class_span"),
+                "similarity": float(match.get("similarity", 0.0)),
+            }
+            return {
+                "stem_name": name,
+                "stem_scores": {name: selected_score},
+                "start_frame": start,
+                "end_frame": end,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "similarity": float(match.get("similarity", 0.0)),
+                "onset_variation": variation,
+                "audio": motif_audio,
+            }
+
         result = (
             scored_result
             if scored_result is not None
             else self.score_all(audio_path, stems, sample_rate)
         )
-        candidates = [name for name in self.config.candidate_stems if name in stems]
         eligible = [
             row
             for row in result["candidates"]

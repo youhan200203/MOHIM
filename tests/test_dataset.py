@@ -132,6 +132,12 @@ class DatasetBuilderTests(unittest.TestCase):
             stems = {"vocals": object(), "other": object()}
             mixture = object()
             motif_scores = {"candidates": [], "melodic_accompaniment": object()}
+            selected_candidate = {
+                "stem_name": "other",
+                "start_sec": 1.0,
+                "end_sec": 5.0,
+                "onset_variation": 0.2,
+            }
 
             with patch(
                 "mohim.dataset._apply_common_headroom",
@@ -143,6 +149,7 @@ class DatasetBuilderTests(unittest.TestCase):
                     separation_result=(stems, 44_100, mixture),
                     motif_scores=motif_scores,
                     validated_onset_variation=0.2,
+                    selected_candidate=selected_candidate,
                 )
 
         self.assertEqual(result.status, "accepted")
@@ -154,6 +161,7 @@ class DatasetBuilderTests(unittest.TestCase):
             44_100,
             scored_result=motif_scores,
             validated_onset_variation=0.2,
+            selected_candidate=selected_candidate,
         )
 
     def test_resume_does_not_reuse_onset_variation_below_threshold(self):
