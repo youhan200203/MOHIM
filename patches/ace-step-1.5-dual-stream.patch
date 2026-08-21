@@ -578,11 +578,12 @@ new file mode 100644
 index 0000000..99b7c47
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_preprocess.py
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,114 @@
 +"""Audio encoding helpers used by dual-stream preprocessing."""
 +
 +from __future__ import annotations
 +
++import math
 +from pathlib import Path
 +from typing import Any
 +
@@ -597,6 +598,7 @@ index 0000000..99b7c47
 +    "accompaniment_target_audio",
 +    "vocal_target_audio",
 +)
++MOTIF_CONDITION_SCHEMA = "anchored_repeated_v1"
 +
 +
 +def encode_stem_latents(
@@ -618,8 +620,11 @@ index 0000000..99b7c47
 +    vae: Any,
 +    dtype: torch.dtype,
 +    target_samples: int,
++    *,
++    motif_start_sec: float = 0.0,
++    motif_end_sec: float | None = None,
 +) -> torch.Tensor:
-+    """Encode ``[motif waveform | silence]`` once at the target duration."""
++    """Encode a phase-aligned motif repeated across the target duration."""
 +    audio_path = Path(path)
 +    if not audio_path.is_file():
 +        raise FileNotFoundError(f"Dual-stream motif not found: {audio_path}")
@@ -628,10 +633,60 @@ index 0000000..99b7c47
 +    motif, _ = load_audio_stereo(
 +        str(audio_path), TARGET_SR, target_samples / TARGET_SR
 +    )
-+    canvas = motif.new_zeros(motif.shape[0], target_samples)
-+    copy_samples = min(motif.shape[-1], target_samples)
-+    canvas[:, :copy_samples] = motif[:, :copy_samples]
++    if motif_end_sec is None:
++        motif_end_sec = motif_start_sec + motif.shape[-1] / TARGET_SR
++    canvas = build_repeated_motif_canvas(
++        motif,
++        target_samples,
++        motif_start_sec=motif_start_sec,
++        motif_end_sec=motif_end_sec,
++    )
 +    return _encode_audio(canvas, vae, dtype)
++
++
++def build_repeated_motif_canvas(
++    motif: torch.Tensor,
++    target_samples: int,
++    *,
++    motif_start_sec: float,
++    motif_end_sec: float,
++    sample_rate: int = TARGET_SR,
++) -> torch.Tensor:
++    """Tile a motif in both directions while preserving its original anchor."""
++    if motif.ndim != 2:
++        raise ValueError("motif must have shape [channels, samples]")
++    if motif.shape[-1] < 1:
++        raise ValueError("motif must contain at least one sample")
++    if target_samples < 1:
++        raise ValueError("target_samples must be positive")
++    if sample_rate < 1:
++        raise ValueError("sample_rate must be positive")
++    if not math.isfinite(motif_start_sec) or not math.isfinite(motif_end_sec):
++        raise ValueError("motif start/end must be finite")
++    if motif_start_sec < 0 or motif_end_sec <= motif_start_sec:
++        raise ValueError("motif_end_sec must be greater than non-negative motif_start_sec")
++
++    period_samples = round((motif_end_sec - motif_start_sec) * sample_rate)
++    if period_samples < 1:
++        raise ValueError("motif duration is shorter than one sample")
++    anchor_start = round(motif_start_sec * sample_rate)
++    period = motif.new_zeros(motif.shape[0], period_samples)
++    copied = min(motif.shape[-1], period_samples)
++    period[:, :copied] = motif[:, :copied]
++
++    canvas = motif.new_zeros(motif.shape[0], target_samples)
++    first_start = anchor_start % period_samples
++    if first_start > 0:
++        first_start -= period_samples
++    for destination_start in range(first_start, target_samples, period_samples):
++        destination_end = min(destination_start + period_samples, target_samples)
++        clipped_start = max(destination_start, 0)
++        if destination_end <= clipped_start:
++            continue
++        source_start = clipped_start - destination_start
++        source_end = source_start + destination_end - clipped_start
++        canvas[:, clipped_start:destination_end] = period[:, source_start:source_end]
++    return canvas
 +
 +
 +def _encode_audio(audio: torch.Tensor, vae: Any, dtype: torch.dtype) -> torch.Tensor:
@@ -643,7 +698,7 @@ new file mode 100644
 index 0000000..f35a86e
 --- /dev/null
 +++ b/acestep/training_v2/dual_stream_test.py
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,137 @@
 +"""Unit tests for the cover-style dual-stream adapter."""
 +
 +import tempfile
@@ -661,6 +716,7 @@ index 0000000..f35a86e
 +    DualStreamInputProjection,
 +    attach_dual_stream_conditioner,
 +)
++from acestep.training_v2.dual_stream_preprocess import build_repeated_motif_canvas
 +
 +
 +class _DecoderCore(nn.Module):
@@ -765,6 +821,19 @@ index 0000000..f35a86e
 +            self.assertEqual(len(first.val_dataset), 2)
 +            self.assertEqual(first.train_dataset.indices, second.train_dataset.indices)
 +            self.assertEqual(first.val_dataset.indices, second.val_dataset.indices)
++
++    def test_repeated_motif_preserves_anchor_and_tiles_both_directions(self):
++        motif = torch.tensor([[10.0, 20.0, 30.0]])
++        canvas = build_repeated_motif_canvas(
++            motif,
++            10,
++            motif_start_sec=4.0,
++            motif_end_sec=7.0,
++            sample_rate=1,
++        )
++        expected = torch.tensor([[30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0]])
++        self.assertTrue(torch.equal(canvas, expected))
++        self.assertTrue(torch.equal(canvas[:, 4:7], motif))
 +
 +
 +if __name__ == "__main__":
@@ -1217,12 +1286,13 @@ index 8cc3bcc..e610e7a 100644
  ) -> tuple[List[Path], int]:
      """Load audio, VAE-encode, text-encode, save intermediates.
 
-@@ -196,6 +237,11 @@ def _pass1_light(
+@@ -196,6 +237,12 @@ def _pass1_light(
      )
      from acestep.training.dataset_builder_modules.preprocess_text import encode_text
      from acestep.training.dataset_builder_modules.preprocess_lyrics import encode_lyrics
 +    from acestep.training_v2.dual_stream_preprocess import (
 +        DUAL_STREAM_AUDIO_FIELDS,
++        MOTIF_CONDITION_SCHEMA,
 +        encode_motif_condition_latents,
 +        encode_stem_latents,
 +    )
@@ -1247,13 +1317,13 @@ index 8cc3bcc..e610e7a 100644
                  audio = audio.unsqueeze(0).to(device=device, dtype=vae.dtype)
 
                  # 2. VAE encode (tiled for long audio)
-@@ -251,13 +299,45 @@ def _pass1_light(
+@@ -251,13 +300,51 @@ def _pass1_light(
                  # Free raw audio immediately -- no longer needed after VAE encode
                  del audio
 
 +                sm = sample_meta.get(str(af.resolve()), sample_meta.get(af.name, {}))
 +
-+                dual_stream_tensors: Dict[str, torch.Tensor] = {}
++                dual_stream_tensors: Dict[str, Any] = {}
 +                if dual_stream:
 +                    missing = [field for field in DUAL_STREAM_AUDIO_FIELDS if not sm.get(field)]
 +                    if missing:
@@ -1263,12 +1333,18 @@ index 8cc3bcc..e610e7a 100644
 +                        target_latents.shape[1], dtype=dtype
 +                    )
 +                    motif_condition = encode_motif_condition_latents(
-+                        sm["motif_seed_audio"], vae, dtype, target_sample_count
++                        sm["motif_seed_audio"],
++                        vae,
++                        dtype,
++                        target_sample_count,
++                        motif_start_sec=float(sm["motif_start_sec"]),
++                        motif_end_sec=float(sm["motif_end_sec"]),
 +                    )
 +                    dual_stream_tensors["motif_seed_latents"] = motif_condition
 +                    dual_stream_tensors["motif_seed_attention_mask"] = torch.ones(
 +                        motif_condition.shape[0], dtype=dtype
 +                    )
++                    dual_stream_tensors["motif_condition_schema"] = MOTIF_CONDITION_SCHEMA
 +                    vocal = encode_stem_latents(
 +                        sm["vocal_target_audio"], vae, dtype, max_duration
 +                    )
@@ -1328,7 +1404,17 @@ index 8cc3bcc..e610e7a 100644
                          "target_latents": target_latents.squeeze(0).cpu(),
                          "attention_mask": attention_mask.squeeze(0).cpu(),
                          "text_hidden_states": text_hs.cpu(),
-@@ -301,9 +401,10 @@ def _pass1_light(
+@@ -291,6 +398,9 @@ def _pass1_light(
+                             "audio_path": str(af),
+                             "filename": af.name,
+                             "caption": caption,
+                             "lyrics": lyrics,
++                            "motif_seed_audio": sm.get("motif_seed_audio"),
++                            "motif_start_sec": sm.get("motif_start_sec"),
++                            "motif_end_sec": sm.get("motif_end_sec"),
+                             "duration": sm.get("duration", 0),
+                             "bpm": sm.get("bpm"),
+@@ -301,9 +404,10 @@ def _pass1_light(
                              "custom_tag": sm.get("custom_tag", ""),
                              "prompt_override": sm.get("prompt_override"),
                          },
@@ -1416,7 +1502,7 @@ index 8cc3bcc..e610e7a 100644
 
                  # Build context latents (silence-based, standard text2music)
                  if silence_latent.dim() == 2:
-@@ -432,17 +590,34 @@ def _pass2_heavy(
+@@ -432,17 +597,35 @@ def _pass2_heavy(
                  base_name = tmp_path.name.replace(".tmp.pt", ".pt")
                  final_path = out_path / base_name
                  meta = data["metadata"]
@@ -1445,6 +1531,7 @@ index 8cc3bcc..e610e7a 100644
 +                for key in (
 +                    "motif_seed_latents",
 +                    "motif_seed_attention_mask",
++                    "motif_condition_schema",
 +                    "accompaniment_target_latents",
 +                    "accompaniment_target_attention_mask",
 +                    "vocal_target_latents",
