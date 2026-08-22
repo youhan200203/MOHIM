@@ -98,3 +98,84 @@ def build_dual_stream_manifest(
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
+
+
+def build_full_song_manifest(
+    processed_dir: str | Path,
+    output_path: str | Path,
+    *,
+    allowed_track_ids: Collection[str] | None = None,
+    caption_template: str = "Full {language} {genre} song with vocals and complete instrumentation, organized around a recurring {motif_stem} motif.",
+) -> dict[str, Any]:
+    """Build a single-stream manifest whose target is the original full song."""
+
+    root = Path(processed_dir).expanduser().resolve()
+    allowed = {str(track_id) for track_id in allowed_track_ids} if allowed_track_ids is not None else None
+    samples: list[dict[str, Any]] = []
+    skipped: list[str] = []
+
+    for metadata_path in sorted(root.glob("*/metadata.json")):
+        sample_dir = metadata_path.parent
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        track_id = str(metadata.get("track_id", sample_dir.name))
+        if metadata.get("status") != "accepted":
+            continue
+        if allowed is not None and track_id not in allowed:
+            continue
+        if metadata.get("schema_version") != 4 or not metadata.get("motif_seed_file"):
+            skipped.append(track_id)
+            continue
+
+        source_audio = Path(str(metadata.get("source_audio", ""))).expanduser()
+        motif_seed = sample_dir / metadata["motif_seed_file"]
+        lyrics_path = sample_dir / "lyrics.txt"
+        if not all(path.is_file() for path in (source_audio, motif_seed, lyrics_path)):
+            skipped.append(track_id)
+            continue
+        lyrics = lyrics_path.read_text(encoding="utf-8").strip()
+        if not lyrics:
+            skipped.append(track_id)
+            continue
+
+        genres = metadata.get("genres") or ["pop"]
+        genre = str(genres[0] if isinstance(genres, list) else genres).strip().lower() or "pop"
+        language = str(metadata.get("language") or "English").strip()
+        motif_stem = str(metadata["motif_stem"])
+        caption = caption_template.format(
+            language=language,
+            genre=genre,
+            motif_stem=motif_stem,
+            motif_stem_title=motif_stem.capitalize(),
+        )
+        samples.append(
+            {
+                "audio_path": str(source_audio.resolve()),
+                "filename": f"{track_id}_full_song{source_audio.suffix}",
+                "motif_seed_audio": str(motif_seed.resolve()),
+                "caption": caption,
+                "lyrics": lyrics,
+                "bpm": None,
+                "keyscale": "",
+                "timesignature": "",
+                "is_instrumental": False,
+                "track_id": track_id,
+                "artist": metadata.get("artist", ""),
+                "title": metadata.get("title", ""),
+                "motif_stem": motif_stem,
+                "motif_start_sec": metadata["motif_start_sec"],
+                "motif_end_sec": metadata["motif_end_sec"],
+            }
+        )
+
+    manifest = {
+        "metadata": {
+            "name": "mohim_full_song_repeated_motif",
+            "num_samples": len(samples),
+            "skipped": skipped,
+        },
+        "samples": samples,
+    }
+    destination = Path(output_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest

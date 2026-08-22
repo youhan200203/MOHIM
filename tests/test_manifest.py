@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mohim.manifest import build_dual_stream_manifest
+from mohim.manifest import build_dual_stream_manifest, build_full_song_manifest
 
 
 class ManifestTests(unittest.TestCase):
@@ -43,6 +43,40 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(Path(manifest["samples"][0]["motif_seed_audio"]).is_file())
             self.assertTrue(Path(manifest["samples"][0]["accompaniment_target_audio"]).is_file())
             self.assertNotIn("motif_target_audio", manifest["samples"][0])
+
+    def test_build_full_song_manifest_uses_original_audio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sample = root / "abc"
+            sample.mkdir()
+            original = root / "original.wav"
+            original.touch()
+            (sample / "motif.wav").touch()
+            (sample / "lyrics.txt").write_text("hello world\n", encoding="utf-8")
+            metadata = {
+                "schema_version": 4,
+                "status": "accepted",
+                "track_id": "track-1",
+                "artist": "Artist",
+                "title": "Title",
+                "genres": ["Pop"],
+                "language": "English",
+                "source_audio": str(original),
+                "motif_stem": "piano",
+                "motif_seed_file": "motif.wav",
+                "motif_start_sec": 1.0,
+                "motif_end_sec": 9.0,
+            }
+            (sample / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            manifest = build_full_song_manifest(root, root / "full-song.json")
+
+            self.assertEqual(manifest["metadata"]["num_samples"], 1)
+            item = manifest["samples"][0]
+            self.assertEqual(Path(item["audio_path"]), original.resolve())
+            self.assertEqual(item["lyrics"], "hello world")
+            self.assertIn("complete instrumentation", item["caption"])
+            self.assertNotIn("accompaniment_target_audio", item)
 
 
 if __name__ == "__main__":
