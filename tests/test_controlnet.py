@@ -3,6 +3,8 @@
 import copy
 import types
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 try:
     import torch
@@ -15,6 +17,7 @@ from mohim.controlnet import (
     TopKCQTMelodyEncoder,
     make_silence_context,
 )
+from mohim.controlnet_training import load_silence_latent
 
 
 class _Transpose(nn.Module):
@@ -188,6 +191,15 @@ class ControlNetTests(unittest.TestCase):
         )
         self.assertEqual(context.shape, (2, 7, 128))
         self.assertTrue(torch.all(context[..., 64:] == 1))
+
+    def test_load_silence_latent_transposes_channel_first_layout(self):
+        channel_first = torch.randn(1, 64, 11)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "silence_latent.pt"
+            torch.save(channel_first, path)
+            loaded = load_silence_latent(path)
+        self.assertEqual(loaded.shape, (1, 11, 64))
+        torch.testing.assert_close(loaded, channel_first.transpose(1, 2))
 
 
 if __name__ == "__main__":

@@ -110,9 +110,13 @@ def load_silence_latent(path: str | Path) -> torch.Tensor:
         raise TypeError(f"Silence latent is not a tensor: {path}")
     if value.ndim == 2:
         value = value.unsqueeze(0)
-    if value.ndim != 3 or value.shape[-1] != 64:
+    if value.ndim == 3 and value.shape[-1] == 64:
+        return value.contiguous()
+    if value.ndim == 3 and value.shape[1] == 64:
+        return value.transpose(1, 2).contiguous()
+    if value.ndim != 3:
         raise ValueError(f"Unexpected silence latent shape: {tuple(value.shape)}")
-    return value
+    raise ValueError(f"Expected one 64-channel axis in silence latent: {tuple(value.shape)}")
 
 
 def move_batch(
