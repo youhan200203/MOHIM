@@ -170,6 +170,53 @@ class ControlNetTests(unittest.TestCase):
         self.assertIsNotNone(self.model.control_blocks[0].after_proj.weight.grad)
         self.assertGreater(self.model.trainable_parameter_count(), 0)
 
+    def test_selective_checkpointing_preserves_output_and_gradients(self):
+        baseline = AceStepDiTControlNet(
+            copy.deepcopy(self.reference),
+            copy_blocks=2,
+            pitch_embedding_dim=4,
+            gradient_checkpointing=False,
+            control_gradient_checkpointing=False,
+        )
+        with torch.no_grad():
+            for control_block in baseline.control_blocks:
+                control_block.after_proj.weight.fill_(0.01)
+                control_block.after_proj.bias.fill_(0.01)
+            baseline.control_blocks[0].before_proj.weight.fill_(0.01)
+            baseline.control_blocks[0].before_proj.bias.fill_(0.01)
+        selective = AceStepDiTControlNet(
+            copy.deepcopy(self.reference),
+            copy_blocks=2,
+            pitch_embedding_dim=4,
+            gradient_checkpointing=True,
+            control_gradient_checkpointing=False,
+        )
+        selective.load_control_state_dict(baseline.control_state_dict())
+        baseline.train()
+        selective.train()
+
+        baseline_output = baseline(
+            **self.inputs, melody_pitch_indices=self.melody, control_scale=1.0
+        )[0]
+        selective_output = selective(
+            **self.inputs, melody_pitch_indices=self.melody, control_scale=1.0
+        )[0]
+        torch.testing.assert_close(selective_output, baseline_output)
+
+        baseline_output.square().mean().backward()
+        selective_output.square().mean().backward()
+        baseline_parameters = dict(baseline.named_parameters())
+        selective_parameters = dict(selective.named_parameters())
+        for name, baseline_parameter in baseline_parameters.items():
+            if not baseline_parameter.requires_grad:
+                continue
+            selective_gradient = selective_parameters[name].grad
+            if baseline_parameter.grad is None:
+                self.assertIsNone(selective_gradient, name)
+            else:
+                self.assertIsNotNone(selective_gradient, name)
+                torch.testing.assert_close(selective_gradient, baseline_parameter.grad)
+
     def test_control_checkpoint_excludes_frozen_backbone(self):
         state = self.model.control_state_dict()
         self.assertEqual(state["copy_blocks"], 2)
