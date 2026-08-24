@@ -140,12 +140,22 @@ def move_batch(
 ) -> dict[str, Any]:
     return {
         **batch,
-        "target_latents": batch["target_latents"].to(device=device, dtype=dtype),
-        "context_latents": batch["context_latents"].to(device=device, dtype=dtype),
-        "attention_mask": batch["attention_mask"].to(device=device),
-        "encoder_hidden_states": batch["encoder_hidden_states"].to(device=device, dtype=dtype),
-        "encoder_attention_mask": batch["encoder_attention_mask"].to(device=device),
-        "melody_pitch_indices": batch["melody_pitch_indices"].to(device=device),
+        "target_latents": batch["target_latents"].to(
+            device=device, dtype=dtype, non_blocking=True
+        ),
+        "context_latents": batch["context_latents"].to(
+            device=device, dtype=dtype, non_blocking=True
+        ),
+        "attention_mask": batch["attention_mask"].to(device=device, non_blocking=True),
+        "encoder_hidden_states": batch["encoder_hidden_states"].to(
+            device=device, dtype=dtype, non_blocking=True
+        ),
+        "encoder_attention_mask": batch["encoder_attention_mask"].to(
+            device=device, non_blocking=True
+        ),
+        "melody_pitch_indices": batch["melody_pitch_indices"].to(
+            device=device, non_blocking=True
+        ),
     }
 
 
