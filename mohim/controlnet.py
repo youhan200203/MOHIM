@@ -248,7 +248,6 @@ class AceStepDiTControlNet(nn.Module):
         copy_blocks: int = 12,
         pitch_embedding_dim: int = 64,
         gradient_checkpointing: bool = True,
-        control_gradient_checkpointing: bool | None = None,
     ) -> None:
         super().__init__()
         total_blocks = len(base_decoder.layers)
@@ -260,7 +259,6 @@ class AceStepDiTControlNet(nn.Module):
         self.base_decoder = base_decoder
         self.copy_blocks = copy_blocks
         self.gradient_checkpointing = gradient_checkpointing
-        self.control_gradient_checkpointing = control_gradient_checkpointing
         self.melody_encoder = TopKCQTMelodyEncoder(
             hidden_size,
             pitch_embedding_dim=pitch_embedding_dim,
@@ -310,7 +308,6 @@ class AceStepDiTControlNet(nn.Module):
         position_ids: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         encoder_attention_mask: torch.Tensor | None,
-        gradient_checkpointing: bool,
     ) -> torch.Tensor:
         def call(current: torch.Tensor) -> torch.Tensor:
             return layer(
@@ -327,7 +324,7 @@ class AceStepDiTControlNet(nn.Module):
                 encoder_attention_mask,
             )[0]
 
-        if gradient_checkpointing and self.training:
+        if self.gradient_checkpointing and self.training:
             return checkpoint(call, hidden, use_reentrant=False)
         return call(hidden)
 
@@ -416,12 +413,7 @@ class AceStepDiTControlNet(nn.Module):
             melody_pitch_indices.to(hidden_states.device), sequence_length
         ).to(hidden_states.dtype)
 
-        def run(
-            layer: nn.Module,
-            values: torch.Tensor,
-            *,
-            gradient_checkpointing: bool,
-        ) -> torch.Tensor:
+        def run(layer: nn.Module, values: torch.Tensor) -> torch.Tensor:
             return self._run_layer(
                 layer,
                 values,
@@ -431,21 +423,9 @@ class AceStepDiTControlNet(nn.Module):
                 position_ids,
                 encoder_hidden_states,
                 cross_mask,
-                gradient_checkpointing,
             )
 
-        backbone_checkpointing = self.gradient_checkpointing
-        control_checkpointing = (
-            backbone_checkpointing
-            if self.control_gradient_checkpointing is None
-            else self.control_gradient_checkpointing
-        )
-
-        hidden_states = run(
-            decoder.layers[0],
-            hidden_states,
-            gradient_checkpointing=backbone_checkpointing,
-        )
+        hidden_states = run(decoder.layers[0], hidden_states)
         control_hidden: torch.Tensor | None = None
         for frozen_index in range(1, self.copy_blocks + 1):
             control = self.control_blocks[frozen_index - 1]
@@ -455,24 +435,12 @@ class AceStepDiTControlNet(nn.Module):
                 if control_hidden is None:
                     raise RuntimeError("Control hidden state was not initialized")
                 control_input = control_hidden
-            control_hidden = run(
-                control.copied_block,
-                control_input,
-                gradient_checkpointing=control_checkpointing,
-            )
+            control_hidden = run(control.copied_block, control_input)
             residual = control.after_proj(control_hidden) * control_scale
-            hidden_states = run(
-                decoder.layers[frozen_index],
-                hidden_states + residual,
-                gradient_checkpointing=backbone_checkpointing,
-            )
+            hidden_states = run(decoder.layers[frozen_index], hidden_states + residual)
 
         for frozen_index in range(self.copy_blocks + 1, len(decoder.layers)):
-            hidden_states = run(
-                decoder.layers[frozen_index],
-                hidden_states,
-                gradient_checkpointing=backbone_checkpointing,
-            )
+            hidden_states = run(decoder.layers[frozen_index], hidden_states)
 
         shift, scale = (decoder.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
         hidden_states = (
