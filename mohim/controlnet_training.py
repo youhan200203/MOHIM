@@ -140,16 +140,34 @@ def flow_matching_step(
     timestep_mu: float,
     timestep_sigma: float,
     control_scale: float = 1.0,
+    noise: torch.Tensor | None = None,
+    timestep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     target = batch["target_latents"]
     batch_size, target_length, channels = target.shape
     if channels != 64:
         raise ValueError(f"Expected 64-channel target latents, got {channels}")
-    noise = torch.randn_like(target)
-    timestep = torch.sigmoid(
-        torch.randn(batch_size, device=target.device, dtype=target.dtype) * timestep_sigma
-        + timestep_mu
-    )
+    if noise is None:
+        noise = torch.randn_like(target)
+    elif noise.shape != target.shape:
+        raise ValueError(
+            f"Fixed noise shape {tuple(noise.shape)} does not match target {tuple(target.shape)}"
+        )
+    else:
+        noise = noise.to(device=target.device, dtype=target.dtype)
+    if timestep is None:
+        timestep = torch.sigmoid(
+            torch.randn(batch_size, device=target.device, dtype=target.dtype) * timestep_sigma
+            + timestep_mu
+        )
+    elif timestep.shape != (batch_size,):
+        raise ValueError(
+            f"Fixed timestep must have shape {(batch_size,)}, got {tuple(timestep.shape)}"
+        )
+    else:
+        timestep = timestep.to(device=target.device, dtype=target.dtype)
+    if torch.any(timestep < 0.0) or torch.any(timestep > 1.0):
+        raise ValueError("Fixed timestep values must be in [0, 1]")
     amount = timestep[:, None, None]
     noised = amount * noise + (1.0 - amount) * target
     context = make_silence_context(
