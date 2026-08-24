@@ -15,6 +15,7 @@ from torch import nn
 from mohim.controlnet import (
     AceStepDiTControlNet,
     TopKCQTMelodyEncoder,
+    align_repeated_topk_cqt,
     make_silence_context,
 )
 from mohim.controlnet_training import load_silence_latent
@@ -179,6 +180,16 @@ class ControlNetTests(unittest.TestCase):
         encoder = TopKCQTMelodyEncoder(16, pitch_embedding_dim=4)
         output = encoder(torch.randint(0, 128, (2, 31, 8)), target_length=7)
         self.assertEqual(output.shape, (2, 7, 16))
+
+    def test_repeated_cqt_is_phase_aligned_to_motif_anchor(self):
+        unaligned = torch.arange(12).remainder(4).unsqueeze(1)
+        aligned = align_repeated_topk_cqt(
+            unaligned,
+            motif_start_sec=1.0,
+            motif_end_sec=5.0,
+            frame_rate=1.0,
+        )
+        self.assertEqual(aligned.squeeze(1).tolist(), [3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2])
 
     def test_silence_context_has_source_and_ones_mask(self):
         silence = torch.randn(1, 3, 64)

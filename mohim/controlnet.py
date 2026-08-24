@@ -22,7 +22,8 @@ from torch.utils.checkpoint import checkpoint
 
 MIDDLE_C_HZ = 261.2
 MIDI_ZERO_HZ = 8.175798915643707
-TOPK_CQT_SCHEMA = "topk_cqt_stereo_128bins_top4_hop512_highpass_middle_c_v1"
+TOPK_CQT_UNALIGNED_SCHEMA = "topk_cqt_stereo_128bins_top4_hop512_highpass_middle_c_v1"
+TOPK_CQT_SCHEMA = "topk_cqt_stereo_128bins_top4_hop512_highpass_middle_c_anchored_v2"
 
 
 def _load_repeated_stereo(
@@ -30,8 +31,10 @@ def _load_repeated_stereo(
     *,
     sample_rate: int,
     duration_seconds: float,
+    motif_start_sec: float = 0.0,
+    motif_end_sec: float | None = None,
 ) -> np.ndarray:
-    """Load a motif, force stereo, and tile it to the requested duration."""
+    """Load a motif and tile it around its occurrence anchor."""
 
     import librosa
 
@@ -44,15 +47,68 @@ def _load_repeated_stereo(
     if audio.shape[-1] == 0:
         raise ValueError(f"Motif audio is empty: {audio_path}")
 
+    if motif_end_sec is None:
+        motif_end_sec = motif_start_sec + audio.shape[-1] / sample_rate
+    if motif_start_sec < 0 or motif_end_sec <= motif_start_sec:
+        raise ValueError("motif_end_sec must be greater than non-negative motif_start_sec")
+
     target_samples = max(1, round(duration_seconds * sample_rate))
-    repeats = math.ceil(target_samples / audio.shape[-1])
-    return np.tile(audio, (1, repeats))[:, :target_samples]
+    period_samples = round((motif_end_sec - motif_start_sec) * sample_rate)
+    if period_samples < 1:
+        raise ValueError("motif duration is shorter than one sample")
+    period = np.zeros((audio.shape[0], period_samples), dtype=np.float32)
+    copied = min(audio.shape[-1], period_samples)
+    period[:, :copied] = audio[:, :copied]
+
+    anchor_start = round(motif_start_sec * sample_rate)
+    first_start = anchor_start % period_samples
+    if first_start > 0:
+        first_start -= period_samples
+    canvas = np.zeros((audio.shape[0], target_samples), dtype=np.float32)
+    for destination_start in range(first_start, target_samples, period_samples):
+        destination_end = min(destination_start + period_samples, target_samples)
+        clipped_start = max(destination_start, 0)
+        if destination_end <= clipped_start:
+            continue
+        source_start = clipped_start - destination_start
+        source_end = source_start + destination_end - clipped_start
+        canvas[:, clipped_start:destination_end] = period[:, source_start:source_end]
+    return canvas
+
+
+def align_repeated_topk_cqt(
+    pitch_indices: torch.Tensor,
+    *,
+    motif_start_sec: float,
+    motif_end_sec: float,
+    frame_rate: float = 48_000 / 512,
+) -> torch.Tensor:
+    """Phase-align an existing zero-anchored repeated CQT at frame resolution."""
+
+    if pitch_indices.ndim != 2:
+        raise ValueError(f"pitch_indices must have shape [frames, pitches], got {tuple(pitch_indices.shape)}")
+    period_seconds = motif_end_sec - motif_start_sec
+    if motif_start_sec < 0 or period_seconds <= 0:
+        raise ValueError("motif_end_sec must be greater than non-negative motif_start_sec")
+    period_frames = max(1, round(period_seconds * frame_rate))
+    phase_frames = round((motif_start_sec % period_seconds) * frame_rate) % period_frames
+    if phase_frames == 0:
+        return pitch_indices.clone()
+    indices = torch.arange(pitch_indices.shape[0], device=pitch_indices.device) - phase_frames
+    indices = torch.where(indices < 0, indices + period_frames, indices)
+    if torch.any(indices >= pitch_indices.shape[0]):
+        raise ValueError(
+            f"CQT has {pitch_indices.shape[0]} frames, shorter than motif period {period_frames}"
+        )
+    return pitch_indices.index_select(0, indices)
 
 
 def extract_repeated_topk_cqt(
     audio_path: str | Path,
     *,
     duration_seconds: float,
+    motif_start_sec: float = 0.0,
+    motif_end_sec: float | None = None,
     sample_rate: int = 48_000,
     hop_length: int = 512,
     n_bins: int = 128,
@@ -74,6 +130,8 @@ def extract_repeated_topk_cqt(
         audio_path,
         sample_rate=sample_rate,
         duration_seconds=duration_seconds,
+        motif_start_sec=motif_start_sec,
+        motif_end_sec=motif_end_sec,
     )
     sos = butter(2, MIDDLE_C_HZ, btype="highpass", fs=sample_rate, output="sos")
     filtered = sosfiltfilt(sos, audio, axis=-1).astype(np.float32, copy=False)
@@ -423,7 +481,9 @@ __all__ = [
     "MIDDLE_C_HZ",
     "MIDI_ZERO_HZ",
     "TOPK_CQT_SCHEMA",
+    "TOPK_CQT_UNALIGNED_SCHEMA",
     "TopKCQTMelodyEncoder",
+    "align_repeated_topk_cqt",
     "extract_repeated_topk_cqt",
     "make_silence_context",
 ]
