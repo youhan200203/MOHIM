@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from .controlnet import AceStepDiTControlNet, TOPK_CQT_SCHEMA, make_silence_context
+from .controlnet import AceStepDiTControlNet, TOPK_CQT_SCHEMA
 
 
 class ControlNetTensorDataset(Dataset):
@@ -50,8 +50,21 @@ class ControlNetTensorDataset(Dataset):
         condition = torch.load(self.condition_dir / path.name, map_location="cpu", weights_only=True)
         if cqt.get("schema") != TOPK_CQT_SCHEMA:
             raise ValueError(f"Unexpected CQT schema in {self.cqt_dir / path.name}")
+        context = target.get("context_latents")
+        if context is None:
+            raise ValueError(f"Missing ACE-Step source context_latents in {path}")
+        if context.ndim != 2 or context.shape[-1] != 128:
+            raise ValueError(
+                f"Expected context_latents shaped [T, 128] in {path}, got {tuple(context.shape)}"
+            )
+        if context.shape[0] != target["target_latents"].shape[0]:
+            raise ValueError(
+                f"Source/target length mismatch in {path}: "
+                f"{context.shape[0]} != {target['target_latents'].shape[0]}"
+            )
         return {
             "target_latents": target["target_latents"],
+            "context_latents": context,
             "attention_mask": target["attention_mask"],
             "encoder_hidden_states": condition["encoder_hidden_states"],
             "encoder_attention_mask": condition["encoder_attention_mask"],
@@ -73,6 +86,9 @@ def collate_controlnet_batch(samples: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "target_latents": torch.stack(
             [_pad_time(sample["target_latents"], target_length) for sample in samples]
+        ),
+        "context_latents": torch.stack(
+            [_pad_time(sample["context_latents"], target_length) for sample in samples]
         ),
         "attention_mask": torch.stack(
             [F.pad(sample["attention_mask"], (0, target_length - sample["attention_mask"].shape[0])) for sample in samples]
@@ -125,6 +141,7 @@ def move_batch(
     return {
         **batch,
         "target_latents": batch["target_latents"].to(device=device, dtype=dtype),
+        "context_latents": batch["context_latents"].to(device=device, dtype=dtype),
         "attention_mask": batch["attention_mask"].to(device=device),
         "encoder_hidden_states": batch["encoder_hidden_states"].to(device=device, dtype=dtype),
         "encoder_attention_mask": batch["encoder_attention_mask"].to(device=device),
@@ -135,7 +152,6 @@ def move_batch(
 def flow_matching_step(
     model: AceStepDiTControlNet,
     batch: dict[str, Any],
-    silence_latent: torch.Tensor,
     *,
     timestep_mu: float,
     timestep_sigma: float,
@@ -170,13 +186,12 @@ def flow_matching_step(
         raise ValueError("Fixed timestep values must be in [0, 1]")
     amount = timestep[:, None, None]
     noised = amount * noise + (1.0 - amount) * target
-    context = make_silence_context(
-        silence_latent,
-        batch_size=batch_size,
-        target_length=target_length,
-        device=target.device,
-        dtype=target.dtype,
-    )
+    context = batch["context_latents"]
+    if context.shape != (batch_size, target_length, 128):
+        raise ValueError(
+            "Expected context_latents shaped "
+            f"{(batch_size, target_length, 128)}, got {tuple(context.shape)}"
+        )
     prediction = model(
         hidden_states=noised,
         timestep=timestep,
@@ -234,7 +249,6 @@ def cuda_memory_summary() -> dict[str, float]:
 def memory_smoke_test(
     model: AceStepDiTControlNet,
     batch: dict[str, Any],
-    silence_latent: torch.Tensor,
     *,
     timestep_mu: float,
     timestep_sigma: float,
@@ -250,7 +264,6 @@ def memory_smoke_test(
     loss = flow_matching_step(
         model,
         batch,
-        silence_latent,
         timestep_mu=timestep_mu,
         timestep_sigma=timestep_sigma,
     )

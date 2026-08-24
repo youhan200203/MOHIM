@@ -131,6 +131,7 @@ class _FakeDecoder(nn.Module):
 
 class _FakeFlowModel(nn.Module):
     def forward(self, *, hidden_states, **kwargs):
+        self.last_context_latents = kwargs["context_latents"].detach().clone()
         return hidden_states * 0.25, None
 
 
@@ -220,18 +221,18 @@ class ControlNetTests(unittest.TestCase):
     def test_flow_matching_step_reuses_fixed_noise_and_timestep(self):
         batch = {
             "target_latents": torch.randn(1, 8, 64),
+            "context_latents": torch.randn(1, 8, 128),
             "attention_mask": torch.ones(1, 8),
             "encoder_hidden_states": torch.randn(1, 3, 5),
             "encoder_attention_mask": torch.ones(1, 3),
             "melody_pitch_indices": torch.randint(0, 128, (1, 16, 8)),
         }
-        silence = torch.randn(1, 8, 64)
         noise = torch.randn_like(batch["target_latents"])
         timestep = torch.tensor([0.5])
+        model = _FakeFlowModel()
         first = flow_matching_step(
-            _FakeFlowModel(),
+            model,
             batch,
-            silence,
             timestep_mu=-0.4,
             timestep_sigma=1.0,
             noise=noise,
@@ -241,28 +242,27 @@ class ControlNetTests(unittest.TestCase):
         second = flow_matching_step(
             _FakeFlowModel(),
             batch,
-            silence,
             timestep_mu=-0.4,
             timestep_sigma=1.0,
             noise=noise,
             timestep=timestep,
         )
         torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(model.last_context_latents, batch["context_latents"])
 
     def test_flow_matching_step_rejects_invalid_fixed_inputs(self):
         batch = {
             "target_latents": torch.randn(1, 8, 64),
+            "context_latents": torch.randn(1, 8, 128),
             "attention_mask": torch.ones(1, 8),
             "encoder_hidden_states": torch.randn(1, 3, 5),
             "encoder_attention_mask": torch.ones(1, 3),
             "melody_pitch_indices": torch.randint(0, 128, (1, 16, 8)),
         }
-        silence = torch.randn(1, 8, 64)
         with self.assertRaisesRegex(ValueError, "Fixed noise shape"):
             flow_matching_step(
                 _FakeFlowModel(),
                 batch,
-                silence,
                 timestep_mu=-0.4,
                 timestep_sigma=1.0,
                 noise=torch.randn(1, 7, 64),
@@ -272,7 +272,6 @@ class ControlNetTests(unittest.TestCase):
             flow_matching_step(
                 _FakeFlowModel(),
                 batch,
-                silence,
                 timestep_mu=-0.4,
                 timestep_sigma=1.0,
                 noise=torch.randn_like(batch["target_latents"]),
