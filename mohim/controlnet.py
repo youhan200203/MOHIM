@@ -24,6 +24,7 @@ MIDDLE_C_HZ = 261.2
 MIDI_ZERO_HZ = 8.175798915643707
 TOPK_CQT_UNALIGNED_SCHEMA = "topk_cqt_stereo_128bins_top4_hop512_highpass_middle_c_v1"
 TOPK_CQT_SCHEMA = "topk_cqt_stereo_128bins_top4_hop512_highpass_middle_c_anchored_v2"
+CONTROLNET_SCHEMA = "ace_step_dit_controlnet_topk_cqt_parallel_v2"
 
 
 def _load_repeated_stereo(
@@ -222,10 +223,10 @@ class ControlTransformerBlock(nn.Module):
         nn.init.zeros_(self.after_proj.weight)
         nn.init.zeros_(self.after_proj.bias)
 
-    def prepare_first(self, frozen_hidden: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    def prepare_first(self, shared_hidden: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         if self.before_proj is None:
             raise RuntimeError("prepare_first is only valid for the first copied block")
-        return frozen_hidden + self.before_proj(condition)
+        return shared_hidden + self.before_proj(condition)
 
 
 def _padding_mask(values: torch.Tensor, query_length: int, key_length: int) -> torch.Tensor:
@@ -284,13 +285,18 @@ class AceStepDiTControlNet(nn.Module):
 
     def control_state_dict(self) -> dict[str, Any]:
         return {
-            "schema": "ace_step_dit_controlnet_topk_cqt_v1",
+            "schema": CONTROLNET_SCHEMA,
             "copy_blocks": self.copy_blocks,
             "melody_encoder": self.melody_encoder.state_dict(),
             "control_blocks": self.control_blocks.state_dict(),
         }
 
     def load_control_state_dict(self, state: dict[str, Any], *, strict: bool = True) -> None:
+        if state.get("schema") != CONTROLNET_SCHEMA:
+            raise ValueError(
+                f"Checkpoint schema {state.get('schema')!r} is incompatible with "
+                f"the parallel ControlNet topology {CONTROLNET_SCHEMA!r}"
+            )
         if int(state["copy_blocks"]) != self.copy_blocks:
             raise ValueError(
                 f"Checkpoint has {state['copy_blocks']} copied blocks, model has {self.copy_blocks}"
@@ -425,21 +431,16 @@ class AceStepDiTControlNet(nn.Module):
                 cross_mask,
             )
 
-        hidden_states = run(decoder.layers[0], hidden_states)
-        control_hidden: torch.Tensor | None = None
-        for frozen_index in range(1, self.copy_blocks + 1):
-            control = self.control_blocks[frozen_index - 1]
-            if frozen_index == 1:
-                control_input = control.prepare_first(hidden_states, melody)
-            else:
-                if control_hidden is None:
-                    raise RuntimeError("Control hidden state was not initialized")
-                control_input = control_hidden
+        control_hidden = self.control_blocks[0].prepare_first(hidden_states, melody)
+        for block_index in range(self.copy_blocks):
+            control = self.control_blocks[block_index]
+            control_input = control_hidden
             control_hidden = run(control.copied_block, control_input)
+            hidden_states = run(decoder.layers[block_index], hidden_states)
             residual = control.after_proj(control_hidden) * control_scale
-            hidden_states = run(decoder.layers[frozen_index], hidden_states + residual)
+            hidden_states = hidden_states + residual
 
-        for frozen_index in range(self.copy_blocks + 1, len(decoder.layers)):
+        for frozen_index in range(self.copy_blocks, len(decoder.layers)):
             hidden_states = run(decoder.layers[frozen_index], hidden_states)
 
         shift, scale = (decoder.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
@@ -478,6 +479,7 @@ def make_silence_context(
 
 __all__ = [
     "AceStepDiTControlNet",
+    "CONTROLNET_SCHEMA",
     "MIDDLE_C_HZ",
     "MIDI_ZERO_HZ",
     "TOPK_CQT_SCHEMA",

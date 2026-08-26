@@ -14,6 +14,7 @@ from torch import nn
 
 from mohim.controlnet import (
     AceStepDiTControlNet,
+    CONTROLNET_SCHEMA,
     TopKCQTMelodyEncoder,
     align_repeated_topk_cqt,
     make_silence_context,
@@ -170,8 +171,68 @@ class ControlNetTests(unittest.TestCase):
         self.assertIsNotNone(self.model.control_blocks[0].after_proj.weight.grad)
         self.assertGreater(self.model.trainable_parameter_count(), 0)
 
+    def test_first_copied_block_receives_same_input_as_first_frozen_block(self):
+        captured = {}
+
+        def capture(name):
+            def hook(_module, args):
+                captured[name] = args[0].detach().clone()
+            return hook
+
+        handles = [
+            self.decoder.layers[0].register_forward_pre_hook(capture("frozen")),
+            self.model.control_blocks[0].copied_block.register_forward_pre_hook(
+                capture("copied")
+            ),
+        ]
+        try:
+            self.model(
+                **self.inputs, melody_pitch_indices=self.melody, control_scale=1.0
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        torch.testing.assert_close(captured["copied"], captured["frozen"])
+
+    def test_copied_residual_is_added_after_matching_frozen_block(self):
+        first_control = self.model.control_blocks[0]
+        with torch.no_grad():
+            first_control.after_proj.weight.copy_(torch.eye(8))
+            first_control.after_proj.bias.zero_()
+
+        captured = {}
+
+        def capture_output(name):
+            def hook(_module, _args, output):
+                captured[name] = output[0].detach().clone()
+            return hook
+
+        def capture_input(name):
+            def hook(_module, args):
+                captured[name] = args[0].detach().clone()
+            return hook
+
+        handles = [
+            self.decoder.layers[0].register_forward_hook(capture_output("frozen_0")),
+            first_control.copied_block.register_forward_hook(capture_output("copied_0")),
+            self.decoder.layers[1].register_forward_pre_hook(capture_input("frozen_1_input")),
+        ]
+        try:
+            self.model(
+                **self.inputs, melody_pitch_indices=self.melody, control_scale=1.0
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        torch.testing.assert_close(
+            captured["frozen_1_input"], captured["frozen_0"] + captured["copied_0"]
+        )
+
     def test_control_checkpoint_excludes_frozen_backbone(self):
         state = self.model.control_state_dict()
+        self.assertEqual(state["schema"], CONTROLNET_SCHEMA)
         self.assertEqual(state["copy_blocks"], 2)
         self.assertNotIn("base_decoder", state)
         restored = AceStepDiTControlNet(
@@ -181,6 +242,18 @@ class ControlNetTests(unittest.TestCase):
             gradient_checkpointing=False,
         )
         restored.load_control_state_dict(state)
+
+    def test_legacy_control_checkpoint_is_rejected(self):
+        state = self.model.control_state_dict()
+        state["schema"] = "ace_step_dit_controlnet_topk_cqt_v1"
+        restored = AceStepDiTControlNet(
+            copy.deepcopy(self.reference),
+            copy_blocks=2,
+            pitch_embedding_dim=4,
+            gradient_checkpointing=False,
+        )
+        with self.assertRaisesRegex(ValueError, "incompatible with the parallel"):
+            restored.load_control_state_dict(state)
 
     def test_melody_encoder_matches_requested_token_length(self):
         encoder = TopKCQTMelodyEncoder(16, pitch_embedding_dim=4)
